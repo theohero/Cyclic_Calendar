@@ -58,7 +58,7 @@ function handleWheel(e) {
 
     if (e.deltaY < 0) {
         // ZOOM IN
-        if (viewLevel < 3) { // Max level is now 3
+        if (viewLevel < 4) { // Max level is now 4
             const hoveredDay = e.target.closest('.day');
             const hoveredCycle = e.target.closest('.month-wrapper');
             const hoveredQuarter = e.target.closest('.quarter-group');
@@ -74,9 +74,12 @@ function handleWheel(e) {
                 viewLevel = 2;
             }
             else if (viewLevel === 2 && hoveredDay) {
-                // Skip the week level and go straight to Day Focus
-                activeKey = hoveredDay.dataset.key; 
-                viewLevel = 3;
+                activeKey = hoveredDay.dataset.key;
+                viewLevel = 3; // Week view
+            }
+            else if (viewLevel === 3 && hoveredDay) {
+                activeKey = hoveredDay.dataset.key;
+                viewLevel = 4; // Day Focus view
             }
             executeZoom();
         }
@@ -340,8 +343,8 @@ function render() {
     let run = new Date(anchorDate);
     const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-    // Handle level 3 (day focus view) - updated to be level 3 instead of 4 separately
-    if (viewLevel === 3) {
+    // Handle level 4 (day focus view) - updated to be level 4 instead of 3
+    if (viewLevel === 4) {
         // Populate the day focus view with the selected day's content
         const dayFocusHeader = document.getElementById('dayFocusHeader');
         const dayFocusSubheader = document.getElementById('dayFocusSubheader');
@@ -395,7 +398,30 @@ function render() {
                 const key = `${run.getFullYear()}-${run.getMonth()+1}-${run.getDate()}`;
                 const weekNum = Math.ceil(i / 7);
 
-                if (viewLevel >= 3 && focusRefs.weekNum !== weekNum) {
+                // Calculate which week the activeKey belongs to when in week view
+                let shouldShowDay = true;
+                if (viewLevel === 3 && activeKey) {
+                    // Find which week the activeKey belongs to in this cycle
+                    const [year, month, day] = activeKey.split('-').map(Number);
+                    const activeDate = new Date(year, month - 1, day);
+                    const cycleStartDate = new Date(run); // run is the start of this cycle
+                    
+                    // Calculate the week number of the activeKey within this cycle
+                    const dayIndexInCycle = Math.floor((activeDate - cycleStartDate) / (1000 * 60 * 60 * 24));
+                    if (dayIndexInCycle >= 0 && dayIndexInCycle < s.len) {
+                        const activeWeekNum = Math.ceil((dayIndexInCycle + 1) / 7);
+                        if (weekNum !== activeWeekNum) {
+                            shouldShowDay = false;
+                        }
+                    } else {
+                        shouldShowDay = false;
+                    }
+                } else if (viewLevel >= 3 && focusRefs.weekNum !== weekNum) {
+                    run.setDate(run.getDate() + 1);
+                    continue;
+                }
+
+                if (!shouldShowDay) {
                     run.setDate(run.getDate() + 1);
                     continue;
                 }
@@ -405,7 +431,7 @@ function render() {
                 d.className = `day ${cycleClass} ${key === todayKey ? 'is-today' : ''} ${key === activeKey ? 'active' : ''}`;
                 
                 const inlineNote = (viewLevel === 3 && dayData.content) 
-                    ? `<div class="day-content-preview" style="font-size:10px; padding:5px; opacity:0.8;">${dayData.content.substring(0, 50)}...</div>` 
+                    ? `<div class="day-content-preview" style="max-height: 80px; overflow-y: auto; border: 1px solid rgba(128, 128, 128, 0.2); border-radius: 3px; padding: 4px;">${dayData.content.substring(0, 200)}...</div>` 
                     : '';
 
                 d.innerHTML = `
@@ -425,8 +451,12 @@ function render() {
                     document.getElementById('noteArea').value = dayData.content || "";
                     document.getElementById('eventInput').value = dayData.event_name || "";
                     
-                    // If we're at level 2 and click a day, go to level 3 (day focus view) (day focus view)
-                    if (viewLevel === 3) {
+                    // If we're at level 2 (Cycle view) and click a day, go to level 3 (Week view)
+                    // If we're at level 3 (Week view) and click a day, go to level 4 (Day Focus view)
+                    if (viewLevel === 2) {
+                        viewLevel = 3;
+                        updateZoomUI();
+                    } else if (viewLevel === 3) {
                         viewLevel = 4;
                         updateZoomUI();
                         
