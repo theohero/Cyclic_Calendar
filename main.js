@@ -58,7 +58,7 @@ function handleWheel(e) {
 
     if (e.deltaY < 0) {
         // ZOOM IN
-        if (viewLevel < 4) {
+        if (viewLevel < 3) { // Max level is now 3
             const hoveredDay = e.target.closest('.day');
             const hoveredCycle = e.target.closest('.month-wrapper');
             const hoveredQuarter = e.target.closest('.quarter-group');
@@ -74,45 +74,9 @@ function handleWheel(e) {
                 viewLevel = 2;
             }
             else if (viewLevel === 2 && hoveredDay) {
-                // More accurate week calculation for focus
-                const dayIndex = Array.from(hoveredDay.parentNode.children).indexOf(hoveredDay);
-                // Skip header elements to calculate week correctly
-                const siblings = Array.from(hoveredDay.parentNode.children);
-                const dayPosition = siblings.indexOf(hoveredDay);
-                // Account for the month-header and weekday-header elements
-                focusRefs.weekNum = Math.ceil((dayPosition - 1) / 7); // -1 because we skip the header
+                // Skip the week level and go straight to Day Focus
+                activeKey = hoveredDay.dataset.key; 
                 viewLevel = 3;
-            }
-            else if (viewLevel === 3 && hoveredDay) {
-                // When at level 3, clicking on a day should go to level 4
-                // Store information about which day was clicked for level 4
-                const dayDate = hoveredDay.querySelector('.real-date')?.textContent;
-                if (dayDate) {
-                    // Find the date corresponding to this day
-                    const parentGrid = hoveredDay.closest('.month-grid');
-                    const dayIndex = Array.from(parentGrid.children).indexOf(hoveredDay);
-                    // Calculate the date based on the current rendering
-                    let tempDate = new Date(anchorDate);
-                    // Count days until we reach the focused quarter and cycle
-                    for (let q = 0; q < 4; q++) {
-                        for (let sIdx = 0; sIdx < 4; sIdx++) {
-                            const span = timespans[q * 4 + sIdx];
-                            if (focusRefs.cycleIdx === q * 4 + sIdx) {
-                                // We found the right cycle, now move to the right day
-                                for (let d = 0; d < dayIndex; d++) {
-                                    tempDate.setDate(tempDate.getDate() + 1);
-                                }
-                                break;
-                            } else {
-                                tempDate.setDate(tempDate.getDate() + span.len);
-                            }
-                        }
-                    }
-                    viewLevel = 4;
-                }
-            }
-            else if (viewLevel === 3) {
-                viewLevel = 4;
             }
             executeZoom();
         }
@@ -331,7 +295,7 @@ async function saveData() {
             content, 
             event_name, 
             tags: content.match(/#\w+/g) || []
-        });
+        }, { onConflict: 'date_key' });
         db[activeKey] = { ...db[activeKey], content, event_name };
         render(); 
         
@@ -341,6 +305,26 @@ async function saveData() {
         console.log(`Saved data for ${activeKey}`);
     } catch (err) {
         console.error("Save failed:", err);
+    }
+}
+
+async function saveFromFocus() {
+    const text = document.getElementById('focusNoteArea').value;
+    if (!activeKey) return;
+
+    // 1. Update local cache for instant UI feedback
+    db[activeKey] = { ...db[activeKey], content: text };
+
+    // 2. Persist to Supabase
+    const { error } = await supabase
+        .from('cyclic_notes')
+        .upsert({ date_key: activeKey, content: text }, { onConflict: 'date_key' });
+
+    if (error) {
+        console.error("Save failed:", error.message);
+        alert("Failed to save note. Check console for details.");
+    } else {
+        console.log("Saved successfully to Supabase.");
     }
 }
 
@@ -356,14 +340,14 @@ function render() {
     let run = new Date(anchorDate);
     const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-    // Handle level 4 (day focus view) separately
-    if (viewLevel === 4) {
+    // Handle level 3 (day focus view) - updated to be level 3 instead of 4 separately
+    if (viewLevel === 3) {
         // Populate the day focus view with the selected day's content
         const dayFocusHeader = document.getElementById('dayFocusHeader');
         const dayFocusSubheader = document.getElementById('dayFocusSubheader');
         const dayFocusContent = document.getElementById('dayFocusContent');
         
-        if (dayFocusHeader && dayFocusSubheader && dayFocusContent && activeKey) {
+        if (dayFocusHeader && dayFocusSubheader && focusNoteArea && activeKey) {
             // Parse activeKey to get the date
             const [year, month, day] = activeKey.split('-').map(Number);
             const activeDate = new Date(year, month - 1, day);
@@ -441,7 +425,7 @@ function render() {
                     document.getElementById('noteArea').value = dayData.content || "";
                     document.getElementById('eventInput').value = dayData.event_name || "";
                     
-                    // If we're at level 3 and click a day, go to level 4 (day focus view)
+                    // If we're at level 2 and click a day, go to level 3 (day focus view) (day focus view)
                     if (viewLevel === 3) {
                         viewLevel = 4;
                         updateZoomUI();
