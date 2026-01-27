@@ -69,10 +69,42 @@ function handleWheel(e) {
                 viewLevel = 2;
             }
             else if (viewLevel === 2 && hoveredDay) {
-                // Approximate week calculation for focus
+                // More accurate week calculation for focus
                 const dayIndex = Array.from(hoveredDay.parentNode.children).indexOf(hoveredDay);
-                focusRefs.weekNum = Math.ceil((dayIndex + 1) / 7);
+                // Skip header elements to calculate week correctly
+                const siblings = Array.from(hoveredDay.parentNode.children);
+                const dayPosition = siblings.indexOf(hoveredDay);
+                // Account for the month-header and weekday-header elements
+                focusRefs.weekNum = Math.ceil((dayPosition - 1) / 7); // -1 because we skip the header
                 viewLevel = 3;
+            }
+            else if (viewLevel === 3 && hoveredDay) {
+                // When at level 3, clicking on a day should go to level 4
+                // Store information about which day was clicked for level 4
+                const dayDate = hoveredDay.querySelector('.real-date')?.textContent;
+                if (dayDate) {
+                    // Find the date corresponding to this day
+                    const parentGrid = hoveredDay.closest('.month-grid');
+                    const dayIndex = Array.from(parentGrid.children).indexOf(hoveredDay);
+                    // Calculate the date based on the current rendering
+                    let tempDate = new Date(anchorDate);
+                    // Count days until we reach the focused quarter and cycle
+                    for (let q = 0; q < 4; q++) {
+                        for (let sIdx = 0; sIdx < 4; sIdx++) {
+                            const span = timespans[q * 4 + sIdx];
+                            if (focusRefs.cycleIdx === q * 4 + sIdx) {
+                                // We found the right cycle, now move to the right day
+                                for (let d = 0; d < dayIndex; d++) {
+                                    tempDate.setDate(tempDate.getDate() + 1);
+                                }
+                                break;
+                            } else {
+                                tempDate.setDate(tempDate.getDate() + span.len);
+                            }
+                        }
+                    }
+                    viewLevel = 4;
+                }
             }
             else if (viewLevel === 3) {
                 viewLevel = 4;
@@ -151,6 +183,28 @@ function render() {
     let run = new Date(anchorDate);
     const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+    // Handle level 4 (day focus view) separately
+    if (viewLevel === 4) {
+        // Populate the day focus view with the selected day's content
+        const dayFocusHeader = document.getElementById('dayFocusHeader');
+        const dayFocusSubheader = document.getElementById('dayFocusSubheader');
+        const dayFocusContent = document.getElementById('dayFocusContent');
+        
+        if (dayFocusHeader && dayFocusSubheader && dayFocusContent && activeKey) {
+            // Parse activeKey to get the date
+            const [year, month, day] = activeKey.split('-').map(Number);
+            const activeDate = new Date(year, month - 1, day);
+            
+            dayFocusHeader.textContent = `${activeDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`;
+            dayFocusSubheader.textContent = getFormattedCyclicDate(activeKey);
+            
+            // Get the content for the active day
+            const dayData = db[activeKey] || {};
+            dayFocusContent.textContent = dayData.content || "No notes for this day";
+        }
+        return; // Exit early since level 4 doesn't need calendar rendering
+    }
+
     for (let q = 0; q < 4; q++) {
         if (viewLevel >= 1 && focusRefs.q !== q) {
             timespans.slice(q*4, q*4+4).forEach(s => run.setDate(run.getDate() + s.len));
@@ -210,6 +264,24 @@ function render() {
                     document.getElementById('selLabel').innerText = `${key} (${getFormattedCyclicDate(key)})`;
                     document.getElementById('noteArea').value = dayData.content || "";
                     document.getElementById('eventInput').value = dayData.event_name || "";
+                    
+                    // If we're at level 3 and click a day, go to level 4 (day focus view)
+                    if (viewLevel === 3) {
+                        viewLevel = 4;
+                        updateZoomUI();
+                        
+                        // Populate the day focus view with the selected day's content
+                        const dayFocusHeader = document.getElementById('dayFocusHeader');
+                        const dayFocusSubheader = document.getElementById('dayFocusSubheader');
+                        const dayFocusContent = document.getElementById('dayFocusContent');
+                        
+                        if (dayFocusHeader && dayFocusSubheader && dayFocusContent) {
+                            dayFocusHeader.textContent = `${run.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`;
+                            dayFocusSubheader.textContent = getFormattedCyclicDate(key);
+                            dayFocusContent.textContent = dayData.content || "No notes for this day";
+                        }
+                    }
+                    
                     render();
                 };
                 
