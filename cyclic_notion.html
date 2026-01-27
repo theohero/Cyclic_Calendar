@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyclic OS</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #ffffff;
+            --sidebar-bg: #fbfbfa;
+            --text-main: #37352f;
+            --text-light: #787774;
+            --border: #edece9;
+            --accent: #2383e2; /* Notion Blue */
+            --today-bg: #fef5d3; /* Notion Yellow highlight */
+            --today-border: #f9d648;
+            --hover: #efefed;
+        }
+
+        /* Dark Mode Support (Optional - switch values for dark theme) */
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #191919;
+                --sidebar-bg: #202020;
+                --text-main: #ffffff;
+                --text-light: #9b9b9b;
+                --border: #2f2f2f;
+                --accent: #2383e2;
+                --today-bg: #3f3e3a;
+                --today-border: #f9d648;
+                --hover: #2c2c2c;
+            }
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text-main);
+            display: flex;
+            height: 100vh;
+            margin: 0;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Sidebar */
+        #sidebar {
+            width: 280px;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border);
+            padding: 24px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .nav-item {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-light);
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            margin-bottom: 8px;
+        }
+
+        .status-card {
+            background: var(--today-bg);
+            padding: 12px;
+            border-radius: 6px;
+            border: 1px solid var(--today-border);
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        /* Editor Area */
+        #noteArea {
+            width: 100%;
+            flex-grow: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-main);
+            font-family: inherit;
+            font-size: 15px;
+            line-height: 1.6;
+            outline: none;
+            padding: 0;
+            resize: none;
+        }
+
+        /* Buttons */
+        button {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        button:hover { background: var(--hover); }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+            border: none;
+        }
+
+        .btn-primary:hover { opacity: 0.9; background: var(--accent); }
+
+        /* Main Content */
+        #main {
+            flex-grow: 1;
+            padding: 72px 96px;
+            overflow-y: auto;
+        }
+
+        h1 { font-size: 40px; font-weight: 700; margin-bottom: 40px; }
+
+        .month-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 2px;
+            background: var(--border);
+            border: 1px solid var(--border);
+            margin-bottom: 48px;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .header {
+            grid-column: span 7;
+            background: var(--bg);
+            padding: 16px;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-main);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .day {
+            background: var(--bg);
+            aspect-ratio: 1.2 / 1;
+            padding: 10px;
+            cursor: pointer;
+            font-size: 13px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .day:hover { background: var(--sidebar-bg); }
+
+        .day b { color: var(--text-main); font-weight: 500; }
+        .day small { color: var(--text-light); font-size: 11px; }
+
+        .day.is-today { background: var(--today-bg); }
+        .day.is-today b { color: #854d0e; }
+
+        .day.has-note::after {
+            content: '•';
+            color: var(--accent);
+            font-size: 20px;
+            line-height: 0;
+            margin-top: 4px;
+        }
+
+        .intercalary { background: var(--sidebar-bg); }
+
+        /* Scrollbar */
+        #main::-webkit-scrollbar { width: 8px; }
+        #main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="nav-item">Status</div>
+    <div id="todayStatus" class="status-card">
+        <div style="font-weight: 600; margin-bottom: 2px;">Today</div>
+        <div id="currentLocation">Loading cycle...</div>
+    </div>
+
+    <div class="nav-item">Active Note</div>
+    <h3 id="selectedDateLabel" style="margin: 0; font-size: 16px;">Select a day</h3>
+    <textarea id="noteArea" placeholder="Start typing..."></textarea>
+
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+        <button onclick="downloadICS()">Export to Google Cal</button>
+        <button class="secondary-btn" onclick="exportData()">Backup JSON</button>
+        <button class="secondary-btn" onclick="document.getElementById('importInput').click()">Restore</button>
+    </div>
+    <input type="file" id="importInput" style="display:none" onchange="importData(event)">
+</div>
+
+<div id="main">
+    <div id="calendarContainer"></div>
+</div>
+
+<script>
+    const structure = [
+        {name: "Q1C1", len: 28}, {name: "Q1C2", len: 28}, {name: "Q1C3", len: 28}, {name: "Reset 1", len: 7, type: "reset"},
+        {name: "Q2C1", len: 28}, {name: "Q2C2", len: 28}, {name: "Q2C3", len: 28}, {name: "Reset 2", len: 7, type: "reset"},
+        {name: "Q3C1", len: 28}, {name: "Q3C2", len: 28}, {name: "Q3C3", len: 28}, {name: "Reset 3", len: 7, type: "reset"},
+        {name: "Q4C1", len: 28}, {name: "Q4C2", len: 28}, {name: "Q4C3", len: 28}, {name: "Reset 4", len: 7, type: "reset"}
+    ];
+
+    function getLocalKey(date) {
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+    }
+
+    let currentSelectedId = null;
+
+    function render() {
+        const container = document.getElementById('calendarContainer');
+        const now = new Date();
+        const year = now.getFullYear();
+        const todayStr = getLocalKey(now);
+        let runningDate = new Date(year, 0, 1);
+        
+        container.innerHTML = `<h1>Cyclic OS</h1>`;
+
+        structure.forEach(span => {
+            const grid = document.createElement('div');
+            grid.className = 'month-grid';
+            grid.innerHTML = `<div class="header">${span.name}</div>`;
+
+            for (let i = 1; i <= span.len; i++) {
+                const dateKey = getLocalKey(runningDate);
+                const dayDiv = document.createElement('div');
+                dayDiv.className = `day ${span.type === 'reset' ? 'intercalary' : ''}`;
+                
+                if (dateKey === todayStr) {
+                    dayDiv.classList.add('is-today');
+                    document.getElementById('currentLocation').innerText = `${span.name}, Day ${i}`;
+                }
+                
+                if (localStorage.getItem(dateKey)) dayDiv.classList.add('has-note');
+
+                dayDiv.innerHTML = `<b>${i}</b><small>${runningDate.toLocaleDateString(undefined, {month:'short', day:'numeric'})}</small>`;
+                
+                dayDiv.onclick = () => {
+                    currentSelectedId = dateKey;
+                    document.getElementById('selectedDateLabel').innerText = `${span.name} / Day ${i}`;
+                    document.getElementById('noteArea').value = localStorage.getItem(dateKey) || '';
+                    document.querySelectorAll('.day').forEach(d => d.style.boxShadow = 'none');
+                    dayDiv.style.boxShadow = 'inset 0 0 0 2px var(--accent)';
+                };
+
+                grid.appendChild(dayDiv);
+                runningDate.setDate(runningDate.getDate() + 1);
+            }
+            container.appendChild(grid);
+        });
+    }
+
+    // Auto-save logic
+    document.getElementById('noteArea').addEventListener('input', () => {
+        if (!currentSelectedId) return;
+        const val = document.getElementById('noteArea').value;
+        val ? localStorage.setItem(currentSelectedId, val) : localStorage.removeItem(currentSelectedId);
+        render(); 
+    });
+
+    function exportData() {
+        const blob = new Blob([JSON.stringify(localStorage)], {type: 'application/json'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `cyclic_notion_backup.json`;
+        a.click();
+    }
+
+    function importData(event) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const data = JSON.parse(e.target.result);
+            Object.keys(data).forEach(k => localStorage.setItem(k, data[k]));
+            render();
+        };
+        reader.readAsText(event.target.files[0]);
+    }
+
+    function downloadICS() {
+        let ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "X-WR-CALNAME:Cyclic Sync"];
+        let runningDate = new Date(new Date().getFullYear(), 0, 1);
+        structure.forEach(span => {
+            let start = runningDate.toISOString().replace(/-|:|\.\d+/g, "").split("T")[0];
+            runningDate.setDate(runningDate.getDate() + span.len);
+            let end = runningDate.toISOString().replace(/-|:|\.\d+/g, "").split("T")[0];
+            ics.push("BEGIN:VEVENT", `SUMMARY:${span.name}`, `DTSTART;VALUE=DATE:${start}`, `DTEND;VALUE=DATE:${end}`, "TRANSP:TRANSPARENT", "END:VEVENT");
+        });
+        ics.push("END:VCALENDAR");
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(new Blob([ics.join("\n")], {type: 'text/calendar'}));
+        link.download = "cyclic_sync.ics";
+        link.click();
+    }
+
+    render();
+</script>
+</body>
+</html>

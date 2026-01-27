@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyclic OS - Notion Style</title>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --sidebar-bg: #f7f7f5;
+            --text-main: #37352f;
+            --text-light: rgba(55, 53, 47, 0.5);
+            --border: #e9e9e7;
+            --accent: #2383e2;
+            --accent-soft: rgba(35, 131, 226, 0.07);
+            --event: #eb5757;
+            --today-bg: #fff9e6;
+            --hover: #efefed;
+            --radius: 8px;
+            --success: #2ecc71;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #191919;
+                --sidebar-bg: #202020;
+                --text-main: #ffffff;
+                --text-light: #9b9b9b;
+                --border: #2f2f2f;
+                --today-bg: #3f3e3a;
+                --hover: #2c2c2c;
+            }
+        }
+
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif; 
+            background: var(--bg); color: var(--text-main); 
+            display: flex; height: 100vh; margin: 0; overflow: hidden;
+        }
+
+        /* --- SIDEBAR --- */
+        #sidebar { 
+            width: 320px; background: var(--sidebar-bg); border-right: 1px solid var(--border); 
+            padding: 24px 16px; display: flex; flex-direction: column; gap: 16px; box-sizing: border-box; 
+            flex-shrink: 0; overflow-y: auto;
+        }
+
+        #syncStatus { align-self: flex-end; font-size: 14px; margin-bottom: -10px; color: var(--text-light); transition: color 0.3s ease; }
+        #syncStatus.synced { color: var(--success); }
+
+        .nav-label { font-size: 11px; font-weight: 600; color: var(--text-light); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 6px; }
+        .toggle-group { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; }
+        .toggle-item { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px;}
+        input, textarea { width: 100%; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-size: 14px; background: var(--bg); color: var(--text-main); outline: none; box-sizing: border-box; }
+
+        /* --- NOTES & LISTS --- */
+        #noteList { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+        .note-item { background: var(--bg); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius); cursor: grab; transition: all 0.2s ease; position: relative; }
+        .note-item:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .note-date-stamp { font-size: 10px; font-weight: 700; color: var(--accent); margin-bottom: 4px; text-transform: uppercase; }
+        .note-preview { font-size: 13px; line-height: 1.4; color: var(--text-main); word-break: break-word; }
+        .tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; color: white; font-weight: 600; }
+
+        /* --- MAIN VIEW & ZOOM LOGIC --- */
+        #main { 
+            flex-grow: 1; padding: 30px 40px; overflow-y: auto; 
+            display: flex; flex-direction: column; align-items: stretch;
+            transition: all 0.3s ease-in-out;
+        }
+
+        #zoomHeader { display: flex; align-items: center; gap: 15px; margin-bottom: 20px; }
+        #zoomOutBtn { 
+            display: none; background: var(--hover); border: 1px solid var(--border); 
+            padding: 4px 12px; border-radius: 12px; cursor: pointer; 
+            font-size: 12px; font-weight: 600; color: var(--text-main);
+        }
+
+        #calContainer { 
+            display: grid; grid-template-columns: repeat(4, 1fr); 
+            gap: 24px; width: 100%; 
+        }
+
+        /* ZOOM LEVEL STYLES */
+        .view-level-1 #calContainer { grid-template-columns: 1fr; }
+        .view-level-2 #calContainer { grid-template-columns: 1fr; }
+        .view-level-3 #calContainer { grid-template-columns: 1fr; }
+
+        /* WEEK VIEW (Level 3): Show Notes inside boxes */
+        .view-level-3 .day { height: auto; min-height: 180px; padding: 10px; }
+        .day-content-preview { 
+            display: none; font-size: 12px; margin-top: 25px; line-height: 1.4;
+            color: var(--text-main); white-space: pre-wrap;
+        }
+        .view-level-3 .day-content-preview { display: block; }
+
+        /* DAY VIEW (Level 4): Fullscreen Overlay */
+        #dayFocusView {
+            display: none; position: fixed; top: 0; left: 320px; right: 0; bottom: 0;
+            background: var(--bg); z-index: 100; padding: 60px; overflow-y: auto;
+        }
+        .view-level-4 #dayFocusView { display: block; }
+        .day-focus-header { font-size: 32px; font-weight: 800; margin-bottom: 10px; }
+
+        /* --- CALENDAR COMPONENTS --- */
+        .quarter-group { display: flex; flex-direction: column; gap: 32px; }
+        .month-grid { display: grid; grid-template-columns: repeat(7, 1fr); border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg); overflow: hidden; }
+        .month-header { grid-column: span 7; padding: 10px 12px; font-size: 11px; font-weight: 700; border-bottom: 1px solid var(--border); }
+        .weekday-header { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; font-size: 10px; font-weight: 700; color: var(--text-light); padding: 8px 0; text-transform: uppercase; }
+        
+        .day { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); aspect-ratio: 1.2; cursor: pointer; position: relative; transition: background 0.1s; }
+        .day:hover { filter: brightness(0.96); }
+        .day.active { background: #fff !important; outline: 2px solid var(--accent); z-index: 2; }
+        .day.is-today { background: var(--today-bg) !important; }
+
+        .real-date { position: absolute; top: 8px; right: 8px; font-size: 12px; font-weight: 600; color: var(--text-light); }
+        .cycle-num { position: absolute; top: 8px; left: 8px; font-size: 10px; font-weight: 700; color: var(--text-light); opacity: 0.6; }
+
+        .dot-row { display: flex; gap: 3px; position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); }
+        .dot { width: 5px; height: 5px; border-radius: 50%; }
+        .dot-note { background: var(--accent); }
+
+        .bg-c1 { background-color: rgba(255, 240, 243, 0.5); }
+        .bg-c2 { background-color: rgba(255, 245, 235, 0.5); }
+        .bg-c3 { background-color: rgba(240, 253, 244, 0.5); }
+        .bg-reset { background-color: rgba(245, 243, 255, 0.5); }
+
+        .auth-btn { background: var(--accent); color: white; border: none; padding: 10px; border-radius: var(--radius); cursor: pointer; font-size: 14px; font-weight: 500; width: 100%; }
+
+        @media (max-width: 1400px) { #calContainer { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 900px) { #calContainer { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div id="syncStatus" title="Sync Status">☁</div>
+
+    <div id="userProfile">
+        <img id="userAvatar" src="" alt="User">
+        <div id="userName">Not Signed In</div>
+    </div>
+
+    <button id="loginBtn" class="auth-btn">Sync with Google</button>
+
+    <div>
+        <div class="nav-label">Settings</div>
+        <div class="toggle-group">
+            <label class="toggle-item"><input type="checkbox" id="toggleRealDate" checked> Dates</label>
+            <label class="toggle-item"><input type="checkbox" id="toggleCycleNum"> Cycle Days</label>
+        </div>
+        <input type="date" id="anchorDateInput" style="font-size: 12px;">
+    </div>
+
+    <hr style="border: 0; border-top: 1px solid var(--border); width: 100%; margin: 4px 0;">
+
+    <div>
+        <div class="nav-label">Navigator & Search</div>
+        <input type="text" id="tagSearch" placeholder="Search content or #tags...">
+    </div>
+
+    <div>
+        <div class="nav-label">Selected: <span id="selLabel" style="color: var(--accent)">None</span></div>
+        <textarea id="noteArea" style="height: 100px; resize: vertical;" placeholder="Write a note..."></textarea>
+        <input type="text" id="eventInput" placeholder="Event name..." style="margin-top: 8px;">
+        <button id="saveNoteBtn" style="width: 100%; margin-top: 10px; background: var(--accent); color: white; border: none; padding: 10px; border-radius: var(--radius); cursor: pointer; font-weight: 600;">
+            Save Note
+        </button>
+    </div>
+
+    <div class="nav-label" style="margin-top: 10px;">Recent Notes</div>
+    <div id="noteList"></div>
+
+    <button id="exportBtn" style="margin-top: auto; background: none; border: 1px solid var(--border); padding: 8px; border-radius: var(--radius); cursor: pointer; color: var(--text-light); font-size: 11px;">
+        Export JSON
+    </button>
+</div>
+
+<div id="main" class="view-level-0">
+    <div id="zoomHeader">
+        <button id="zoomOutBtn">← Back</button>
+        <h1 id="viewTitle" style="margin: 0; font-size: 24px;">Cyclic OS</h1>
+    </div>
+    
+    <div id="calContainer"></div>
+
+    <div id="dayFocusView">
+        <button onclick="document.getElementById('zoomOutBtn').click()" style="background:none; border:none; color:var(--accent); cursor:pointer; font-weight:600; margin-bottom:20px;">← Close Focus</button>
+        <div id="dayFocusHeader" class="day-focus-header"></div>
+        <div id="dayFocusSubheader" class="nav-label" style="font-size: 14px; margin-bottom: 30px;"></div>
+        <div id="dayFocusContent" style="font-size: 18px; line-height: 1.6; max-width: 800px;"></div>
+    </div>
+</div>
+
+<script type="module" src="/main.js"></script>
+</body>
+</html>

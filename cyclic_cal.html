@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cyclic OS - Real-Time Sync</title>
+    <style>
+        :root { --bg: #0f111a; --card: #1a1c25; --text: #a6accd; --accent: #c792ea; --today: #ffcb6b; --border: #292d3e; }
+        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); display: flex; height: 100vh; margin: 0; }
+        #sidebar { width: 300px; background: var(--card); border-right: 1px solid var(--border); padding: 20px; display: flex; flex-direction: column; gap: 15px; }
+        #main { flex-grow: 1; padding: 30px; overflow-y: auto; }
+        .month-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin-bottom: 40px; }
+        .day { background: var(--bg); border: 1px solid var(--border); aspect-ratio: 1/1; padding: 8px; cursor: pointer; border-radius: 4px; position: relative; font-size: 0.9em; }
+        .day:hover { border-color: var(--accent); }
+        /* Highlights Today */
+        .day.is-today { border: 2px solid var(--today) !important; box-shadow: 0 0 10px rgba(255, 203, 107, 0.3); }
+        .day.is-today::before { content: 'TODAY'; position: absolute; top: -12px; left: 5px; font-size: 0.6em; color: var(--today); font-weight: bold; }
+        
+        .day.has-note::after { content: ''; position: absolute; bottom: 5px; right: 5px; width: 5px; height: 5px; background: var(--accent); border-radius: 50%; }
+        .header { grid-column: span 7; font-weight: bold; color: var(--accent); border-bottom: 1px solid var(--border); padding: 10px 0; }
+        .leap-week { background: #2d1a2d; border: 1px dashed var(--accent); }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>Cyclic Sync</h2>
+    <p style="font-size: 0.8em; opacity: 0.7;">Synced to Gregorian Epoch: Jan 1st</p>
+    
+    <div id="todayStatus" style="background: #1e2132; padding: 15px; border-radius: 8px; border-left: 4px solid var(--today);">
+        <small>Current Position:</small><br>
+        <strong id="currentLocation">Calculating...</strong>
+    </div>
+
+    <hr style="width:100%; border:0; border-top:1px solid var(--border);">
+    
+    <h3 id="selectedDateLabel">Select a day</h3>
+    <textarea id="noteArea" placeholder="Notes..." style="height: 150px; background:#000; color:#fff; border:1px solid var(--border);" oninput="saveNote()"></textarea>
+    <button onclick="exportNotes()" style="margin-top:10px; cursor:pointer;">Backup All Notes</button>
+</div>
+
+<div id="main">
+    <div id="calendarContainer"></div>
+</div>
+
+<script>
+    const structure = [
+    {name: "Q1C1", len: 28}, {name: "Q1C2", len: 28}, {name: "Q1C3", len: 28}, {name: "Reset 1", len: 7, type: "reset"},
+    {name: "Q2C1", len: 28}, {name: "Q2C2", len: 28}, {name: "Q2C3", len: 28}, {name: "Reset 2", len: 7, type: "reset"},
+    {name: "Q3C1", len: 28}, {name: "Q3C2", len: 28}, {name: "Q3C3", len: 28}, {name: "Reset 3", len: 7, type: "reset"},
+    {name: "Q4C1", len: 28}, {name: "Q4C2", len: 28}, {name: "Q4C3", len: 28}, {name: "Reset 4", len: 7, type: "reset"}
+];
+
+// Helper to get a consistent YYYY-MM-DD string in LOCAL time
+function getLocalDateString(date) {
+    const offset = date.getTimezoneOffset();
+    const localDate = new Date(date.getTime() - (offset * 60 * 1000));
+    return localDate.toISOString().split('T')[0];
+}
+
+function isLeapYear(year) {
+    // 53-week rule check
+    const d = new Date(year, 11, 31);
+    return d.getDay() === 4 || (new Date(year, 0, 1).getDay() === 4);
+}
+
+function renderCalendar() {
+    const container = document.getElementById('calendarContainer');
+    const now = new Date();
+    const year = now.getFullYear();
+    
+    // We set this to midnight LOCAL time
+    let runningDate = new Date(year, 0, 1, 0, 0, 0, 0); 
+    const todayStr = getLocalDateString(now);
+
+    container.innerHTML = `<h1>Cycle of ${year}</h1>`;
+
+    let fullStructure = [...structure];
+    if (isLeapYear(year)) {
+        fullStructure.push({name: "SUPER RESET (Leap Week)", len: 7, type: "leap"});
+    }
+
+    fullStructure.forEach(span => {
+        const grid = document.createElement('div');
+        grid.className = 'month-grid';
+        grid.innerHTML = `<div class="header">${span.name}</div>`;
+
+        for (let i = 1; i <= span.len; i++) {
+            const dateStr = getLocalDateString(runningDate);
+            const dayDiv = document.createElement('div');
+            dayDiv.className = `day ${span.type === 'leap' ? 'leap-week' : ''}`;
+            
+            // Strictly compare local YYYY-MM-DD strings
+            if (dateStr === todayStr) {
+                dayDiv.classList.add('is-today');
+                document.getElementById('currentLocation').innerText = `${span.name} - Day ${i}`;
+            }
+            
+            if (localStorage.getItem(dateStr)) dayDiv.classList.add('has-note');
+
+            dayDiv.innerHTML = `<b>Day ${i}</b><br><small>${runningDate.toLocaleDateString(undefined, {month:'short', day:'numeric'})}</small>`;
+            dayDiv.onclick = () => selectDay(dateStr, `${span.name} - Day ${i}`);
+            
+            grid.appendChild(dayDiv);
+            
+            // Increment by exactly 24 hours
+            runningDate.setDate(runningDate.getDate() + 1);
+        }
+        container.appendChild(grid);
+    });
+}
+
+let currentId = null;
+function selectDay(id, label) {
+    currentId = id;
+    document.getElementById('selectedDateLabel').innerText = label;
+    document.getElementById('noteArea').value = localStorage.getItem(id) || '';
+}
+
+function saveNote() {
+    if (!currentId) return;
+    const val = document.getElementById('noteArea').value;
+    val ? localStorage.setItem(currentId, val) : localStorage.removeItem(currentId);
+    renderCalendar();
+}
+
+function exportNotes() {
+    const blob = new Blob([JSON.stringify(localStorage)], {type: 'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `cyclic_backup_${new Date().getFullYear()}.json`;
+    a.click();
+}
+
+renderCalendar();
+</script>
+</body>
+</html>

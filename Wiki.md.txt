@@ -1,0 +1,119 @@
+# Cyclic OS: Project Knowledge & Implementation Guide
+
+## 1. Project Concept: The "Deep Zoom" Philosophy
+
+**Cyclic OS** is a spatial temporal management system designed for high-density information architecture. Unlike traditional linear calendars, it organizes time into a hierarchical, fractal structure inspired by cyclic biology and productivity frameworks.
+
+### The Core Loop
+
+The system uses a custom calendar anchor (defaulting to a Monday start) and divides a year into:
+
+- **4 Quarters (Q1–Q4)**
+- **3 Cycles per Quarter (C1–C3)** + **1 Reset Week**
+- **4 Weeks per Cycle (W1–W4)**
+- **7 Days per Week (D1–D7)**
+
+## 2. Technical Frameworks & Stack
+
+- **Frontend**: Vanilla HTML5, CSS3, and JavaScript (ES6+ Modules).
+- **Backend/Database**: **Supabase** (PostgreSQL) for real-time data persistence and authentication.
+- **Styling**: A "Notion-esque" aesthetic focusing on minimalist borders, high scannability, and light/dark mode support.
+- **Interaction Model**: 5-Level Zoom Logic (0: Global, 1: Quarter, 2: Cycle, 3: Week, 4: Day Focus).
+
+## 3. Project Structure & File Manifest
+
+### `index.html` (Layout & Style)
+
+- **Sidebar**: Contains sync status, user profile, settings (Date/Cycle toggles), search/navigation, and a "Recent Notes" list.
+- **Main Canvas**: A dynamic container (`#main`) that changes its CSS class based on the current zoom level (`view-level-0` to `view-level-4`).
+- **Focus Tree (Level 1/2 UI)**: A specific placement of "Subjects of Focus" windows arranged in a branching tree structure (Cycle focus → Weekly focus).
+- **Year Navigator**: A miniaturized navigation header at the top of the main view to allow "teleportation" between quarters.
+
+### `main.js` (Logic & State)
+
+- **State Management**: Tracks `viewLevel` and `focusRefs` (Current Q, Cycle, or Week in focus).
+- **Zoom Engine**:
+    - **Click-to-Zoom**: Dive deeper by clicking specific groups.
+    - **Scroll-to-Zoom**: A `wheel` event listener with `passive: false` that detects hover context to zoom into the specific element under the cursor.
+- **Supabase Integration**: Handles `upsert` operations for notes, events, and tags, indexed by a `date_key` (YYYY-M-D).
+- **Cyclic Date Helper**: A custom algorithm that translates standard Gregorian dates into "Cyclic Addresses" (e.g., `Q1.C1.W2.D3`).
+
+## 4. Current Progress & Feature Set
+
+- **Functional Spatial Navigation**: The user can zoom from an 11-month overview down to a single day focus using the mouse wheel.
+- **Context-Aware UI**:
+    - **Level 0**: High-level grid.
+    - **Level 1 (Quarter)**: Implementation of the 3-Cycle vertical stack with a sidebar "Subject of Focus" tree.
+    - **Level 3 (Week)**: Inline note previews visible directly within the day blocks.
+- **Data Persistence**: Full integration with Supabase for saving notes, event names, and auto-extracted `#tags`.
+- **Dynamic Customization**: Ability to change the "Anchor Date" to shift the entire cyclic calendar starting point.
+
+## 5. Metadata for AI Context
+
+- **Primary Goal**: Create a "Time OS" where the user never loses the context of the larger year while focusing on a specific day.
+- **Visual Logic**: Placement over style. Elements are arranged to show relationships between "Intent" (Subjects of Focus) and "Execution" (Daily Notes).
+
+### 1. The Core Grid (Left Section of Image)
+
+- **Structure**: A vertical stack of three **Cycles (C1, C2, C3)**, each containing four **Weeks (W1–W4)**, totaling 12 weeks of content per quarter.
+- **Terminal Row**: A standalone **Reset Week** (the 13th week) at the bottom to complete the quarterly transition.
+- **Data Density**: At this level, the day cells (D1–D7) should transition from simple dots to small "micro-previews" of content.
+
+### 2. Subjects of Focus: The Tree Logic (Bottom Right of Image)
+
+- **Placement**: This sits alongside the main grid as a sidebar or "context panel" specifically for the active Quarter.
+- **Hierarchy**: It functions as a **input tree**:
+    - **Level A (Cycle)**: A high-level text field for the overall focus of C1, C2, and C3.
+    - **Level B (Weekly)**: Branching out from each Cycle focus are four sub-windows for W1, W2, W3, and W4.
+- **Interaction**: This allows the user to define *intent* (the tree) right next to the *execution* (the grid).
+
+### 3. The Year Overview & Navigator (Top Right of Image)
+
+- **Visual Index**: A miniaturized map of the entire year (Q1–Q4).
+- **Active Indicator**: A visual highlight (color frame) showing exactly where the current date or current view is "docked" within the year.
+- **Teleportation**: Clicking any week in this mini-map should update `focusRefs` and instantly re-render the main grid to that specific cycle/week.
+
+---
+
+### Proposed Structural Logic for the Code:
+
+To support this without the code becoming a mess, I will structure the data flow like this:
+
+- **`subjects_of_focus` Table**: A new Supabase table linked by `quarter_id` and `cycle_id` to store those tree-view text fields.
+- **View-Switching**:
+    - **Global (Level 0)**: Shows four Quarter blocks.
+    - **Quarter (Level 1)**: Expands the selected Quarter to fill the screen, reveals the **Focus Tree** on the right, and the **Year Navigator** at the top.
+
+# Issues
+
+Based on our last few iterations and the schema you provided, here are the core technical and structural problems we are currently solving to align the code with your vision:
+
+### 1. The "Quarterly View" Layout Mismatch
+
+- **Current State**: The code currently renders a simple grid of months even when zoomed in.
+- **The Problem**: Your schema requires a specific **vertical stack** of three cycles (C1, C2, C3) on the left, a **Reset Week** at the bottom, and a **Subject of Focus Tree** on the right.
+- **Impact**: Level 1 zoom doesn't yet feel like the "Dashboard" shown in your image; it just looks like a larger calendar.
+
+### 2. Hierarchical Input (The "Focus Tree")
+
+- **Current State**: We only have a single `noteArea` in the sidebar for daily notes.
+- **The Problem**: The schema requires separate, persistent text fields for **Cycle Focus** and **Weekly Focus** that are distinct from daily entries.
+- **Impact**: There is currently no place in the database or UI to store the "Intent" (Subjects of Focus) shown in the bottom-right of your diagram.
+
+### 3. Navigation & "Teleportation"
+
+- **Current State**: Moving between quarters requires zooming out to Level 0 and zooming back in elsewhere.
+- **The Problem**: The top-right section of your schema shows a **Year Navigator** that allows users to click a week and "teleport" the view instantly.
+- **Impact**: The "spatial" feeling is interrupted by having to manually zoom in and out to navigate the year.
+
+### 4. Mouse Wheel Focus Logic
+
+- **Current State**: While the wheel triggers the `viewLevel` change, it doesn't always "target" the correct nested element perfectly.
+- **The Problem**: If the mouse is over the "Subjects of Focus" area while scrolling, the system needs to know whether to zoom into the tree or the calendar grid.
+- **Impact**: Zooming can feel "jumpy" if the cursor isn't perfectly centered on a day block.
+
+### 5. Data Schema Limitations
+
+- **Current State**: Our Supabase table is optimized for `date_key` (single days).
+- **The Problem**: We need a way to store data that "belongs" to a whole week or a whole cycle (the Focus Tree) without attaching it to a specific Tuesday or Wednesday.
+- **Impact**: Saving a "Cycle 1 Focus" currently doesn't have a dedicated home in the `cyclic_notes` table.

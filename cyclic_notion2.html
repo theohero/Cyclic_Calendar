@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cyclic OS - Pro</title>
+    <style>
+        :root {
+            --bg: #ffffff; --sidebar-bg: #fbfbfa; --text-main: #37352f;
+            --text-light: #787774; --border: #edece9; --accent: #2383e2;
+            --event: #eb5757; --today-bg: #fef5d3; --hover: #efefed;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #191919; --sidebar-bg: #202020; --text-main: #ffffff;
+                --text-light: #9b9b9b; --border: #2f2f2f; --today-bg: #3f3e3a;
+            }
+        }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text-main); display: flex; height: 100vh; margin: 0; overflow: hidden; }
+        
+        /* Sidebar */
+        #sidebar { width: 320px; background: var(--sidebar-bg); border-right: 1px solid var(--border); padding: 20px; display: flex; flex-direction: column; gap: 15px; box-sizing: border-box; }
+        .nav-label { font-size: 11px; font-weight: 600; color: var(--text-light); text-transform: uppercase; letter-spacing: 0.05em; }
+        
+        /* Inputs */
+        input, textarea { width: 100%; border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-family: inherit; font-size: 14px; background: var(--bg); color: var(--text-main); box-sizing: border-box; }
+        
+        /* Main View */
+        #main { flex-grow: 1; padding: 40px 60px; overflow-y: auto; }
+        .month-grid { display: grid; grid-template-columns: repeat(7, 1fr); border-top: 1px solid var(--border); border-left: 1px solid var(--border); margin-bottom: 40px; }
+        .month-header { grid-column: span 7; padding: 10px; font-weight: 600; color: var(--text-light); border-right: 1px solid var(--border); }
+        
+        .day { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); aspect-ratio: 1.2; padding: 8px; cursor: pointer; position: relative; display: flex; flex-direction: column; }
+        .day:hover { background: var(--hover); }
+        .day.is-today { background: var(--today-bg); }
+        
+        /* Indicators */
+        .dot-row { display: flex; gap: 4px; margin-top: auto; }
+        .dot { width: 6px; height: 6px; border-radius: 50%; }
+        .dot-note { background: var(--accent); }
+        .dot-event { background: var(--event); }
+        
+        .event-text { font-size: 10px; color: var(--event); margin-top: 2px; font-weight: 600; white-space: nowrap; overflow: hidden; }
+        
+        /* Search */
+        #searchResult { font-size: 12px; color: var(--accent); margin-top: -10px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="nav-label">Search Tags</div>
+    <input type="text" id="tagSearch" placeholder="Type a tag (e.g. #work)..." oninput="render()">
+    <div id="searchResult"></div>
+
+    <div class="nav-label">Selected: <span id="selLabel">None</span></div>
+    
+    <div class="nav-label" style="font-size: 9px;">Daily Note</div>
+    <textarea id="noteArea" style="height: 150px;" placeholder="Add notes & #tags..."></textarea>
+    
+    <div class="nav-label" style="font-size: 9px;">Events</div>
+    <input type="text" id="eventInput" placeholder="Add event name..." onchange="saveData()">
+
+    <div style="margin-top: auto;" class="nav-label">System</div>
+    <button onclick="exportAll()">Export All Data</button>
+</div>
+
+<div id="main">
+    <h1 id="yearHeader">Cyclic OS</h1>
+    <div id="calContainer"></div>
+</div>
+
+<script>
+    const structure = [
+        {name: "Q1C1", len: 28}, {name: "Q1C2", len: 28}, {name: "Q1C3", len: 28}, {name: "Reset 1", len: 7},
+        {name: "Q2C1", len: 28}, {name: "Q2C2", len: 28}, {name: "Q2C3", len: 28}, {name: "Reset 2", len: 7},
+        {name: "Q3C1", len: 28}, {name: "Q3C2", len: 28}, {name: "Q3C3", len: 28}, {name: "Reset 3", len: 7},
+        {name: "Q4C1", len: 28}, {name: "Q4C2", len: 28}, {name: "Q4C3", len: 28}, {name: "Reset 4", len: 7}
+    ];
+
+    let activeKey = null;
+
+    // Helper: Local storage handling for objects
+    function getDB() { return JSON.parse(localStorage.getItem('cyclic_db') || '{}'); }
+    function setDB(db) { localStorage.setItem('cyclic_db', JSON.stringify(db)); }
+
+    function render() {
+        const container = document.getElementById('calContainer');
+        const db = getDB();
+        const query = document.getElementById('tagSearch').value.toLowerCase();
+        const now = new Date();
+        const yr = now.getFullYear();
+        let run = new Date(yr, 0, 1);
+        const todayKey = `${yr}-${now.getMonth()+1}-${now.getDate()}`;
+
+        container.innerHTML = "";
+        let matchCount = 0;
+
+        structure.forEach(s => {
+            const grid = document.createElement('div');
+            grid.className = 'month-grid';
+            grid.innerHTML = `<div class="month-header">${s.name}</div>`;
+
+            for (let i = 1; i <= s.len; i++) {
+                const key = `${yr}-${run.getMonth()+1}-${run.getDate()}`;
+                const dayData = db[key] || { note: "", event: "" };
+                
+                // Tag Query Logic
+                let isMatch = query && dayData.note.toLowerCase().includes(query);
+                if(isMatch) matchCount++;
+
+                const d = document.createElement('div');
+                d.className = 'day';
+                if (key === todayKey) d.classList.add('is-today');
+                if (isMatch) d.style.background = "rgba(35, 131, 226, 0.1)";
+
+                let dots = `<div class="dot-row">`;
+                if(dayData.note) dots += `<div class="dot dot-note"></div>`;
+                if(dayData.event) dots += `<div class="dot dot-event"></div>`;
+                dots += `</div>`;
+
+                d.innerHTML = `<b>${i}</b><small>${run.toLocaleDateString(undefined, {month:'short', day:'numeric'})}</small>
+                               ${dayData.event ? `<div class="event-text">${dayData.event}</div>` : ''}
+                               ${dots}`;
+                
+                d.onclick = () => {
+                    activeKey = key;
+                    document.getElementById('selLabel').innerText = s.name + " D" + i;
+                    document.getElementById('noteArea').value = dayData.note;
+                    document.getElementById('eventInput').value = dayData.event;
+                };
+
+                grid.appendChild(d);
+                run.setDate(run.getDate() + 1);
+            }
+            container.appendChild(grid);
+        });
+        document.getElementById('searchResult').innerText = query ? `Found ${matchCount} matches` : "";
+    }
+
+    function saveData() {
+        if (!activeKey) return;
+        const db = getDB();
+        db[activeKey] = {
+            note: document.getElementById('noteArea').value,
+            event: document.getElementById('eventInput').value
+        };
+        setDB(db);
+        render();
+    }
+
+    document.getElementById('noteArea').oninput = saveData;
+
+    function exportAll() {
+        const data = localStorage.getItem('cyclic_db');
+        const b = new Blob([data], {type:'application/json'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(b); a.download = "cyclic_data.json"; a.click();
+    }
+
+    render();
+</script>
+</body>
+</html>
