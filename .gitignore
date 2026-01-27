@@ -1,1 +1,12 @@
-Nothing needs to be added to .gitignore since only a source file (main.js) was modified and there are no build artifacts, dependencies, or temporary files in the changes.
+```
+# Environment variables
+.env
+.env.local
+.env.*
+
+# Logs
+*.log
+
+# Examples
+.env.example
+```

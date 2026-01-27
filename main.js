@@ -10,6 +10,11 @@ let activeKey = null;
 let showRealDates = true;  
 let showCycleDays = false; 
 
+// GOOGLE SYNC STATE
+let gapiLoaded = false;
+let gapiReady = false;
+let isSyncing = false;
+
 // ZOOM STATE
 let viewLevel = 0; 
 let focusRefs = { q: null, cycleIdx: null, weekNum: null };
@@ -150,6 +155,140 @@ function getFormattedCyclicDate(targetDateKey) {
     return "";
 }
 
+// --- GOOGLE CALENDAR SYNC ---
+
+function loadGapi() {
+    return new Promise((resolve, reject) => {
+        const checkGapi = () => {
+            if (window.gapi) {
+                gapiLoaded = true;
+                window.gapi.load('client:auth2:calendar', {
+                    callback: () => {
+                        gapiReady = true;
+                        resolve();
+                    },
+                    onerror: () => {
+                        console.error('Failed to load GAPI');
+                        reject(new Error('Failed to load GAPI'));
+                    }
+                });
+            } else {
+                setTimeout(checkGapi, 100);
+            }
+        };
+        checkGapi();
+    });
+}
+
+async function initGoogleAuth() {
+    if (!gapiReady) {
+        await loadGapi();
+    }
+    
+    // Check if API keys are configured
+    if (!import.meta.env.VITE_GOOGLE_API_KEY || !import.meta.env.VITE_GOOGLE_CLIENT_ID) {
+        throw new Error('Google API keys not configured. Please set VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLIENT_ID in your environment variables.');
+    }
+    
+    await window.gapi.client.init({
+        apiKey: import.meta.env.VITE_GOOGLE_API_KEY,
+        clientId: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+        discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest"],
+        scope: "https://www.googleapis.com/auth/calendar"
+    });
+
+    return window.gapi.auth2.getAuthInstance();
+}
+
+async function syncWithGoogle() {
+    if (isSyncing) return;
+    
+    isSyncing = true;
+    const syncStatus = document.getElementById('syncStatus');
+    if (syncStatus) {
+        syncStatus.textContent = '☁ Syncing...';
+        syncStatus.style.color = 'orange';
+    }
+
+    try {
+        const authInstance = await initGoogleAuth();
+        const isSignedIn = authInstance.isSignedIn.get();
+        
+        if (!isSignedIn) {
+            // Sign in the user
+            await authInstance.signIn();
+        }
+        
+        // Fetch events from Google Calendar
+        const response = await window.gapi.client.calendar.events.list({
+            calendarId: 'primary',
+            timeMin: (new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)).toISOString(), // Last 30 days
+            timeMax: (new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)).toISOString(), // Next 90 days
+            showDeleted: false,
+            singleEvents: true,
+            orderBy: 'startTime'
+        });
+
+        // Process events and save to our database
+        const events = response.result.items || [];
+        for (const event of events) {
+            const startDate = event.start.date || event.start.dateTime;
+            const dateObj = new Date(startDate);
+            const key = `${dateObj.getFullYear()}-${dateObj.getMonth()+1}-${dateObj.getDate()}`;
+            
+            // Update our local db with event info
+            if (!db[key]) {
+                db[key] = {};
+            }
+            
+            // Combine existing content with calendar event
+            const existingContent = db[key].content || '';
+            const eventContent = event.summary || '';
+            const eventDescription = event.description || '';
+            
+            // Only add the event if it's not already in the content
+            if (!existingContent.includes(eventContent)) {
+                const eventText = `${eventContent}${eventDescription ? ': ' + eventDescription : ''}`;
+                db[key].content = existingContent ? `${existingContent}\n${eventText}` : eventText;
+                db[key].event_name = eventContent;
+                
+                // Save to Supabase
+                await supabase.from('cyclic_notes').upsert({
+                    date_key: key,
+                    content: db[key].content,
+                    event_name: eventContent,
+                    tags: db[key].content.match(/#\w+/g) || []
+                });
+            }
+        }
+        
+        // Update UI
+        if (syncStatus) {
+            syncStatus.textContent = '☁ Synced';
+            syncStatus.style.color = 'green';
+            setTimeout(() => {
+                syncStatus.textContent = '☁';
+                syncStatus.style.color = '';
+            }, 2000);
+        }
+        
+        // Re-render the calendar
+        render();
+    } catch (error) {
+        console.error('Error syncing with Google Calendar:', error);
+        if (syncStatus) {
+            syncStatus.textContent = '☁ Sync Failed';
+            syncStatus.style.color = 'red';
+            setTimeout(() => {
+                syncStatus.textContent = '☁';
+                syncStatus.style.color = '';
+            }, 2000);
+        }
+    } finally {
+        isSyncing = false;
+    }
+}
+
 // --- CORE FUNCTIONALITY ---
 
 async function saveData() {
@@ -166,6 +305,11 @@ async function saveData() {
         });
         db[activeKey] = { ...db[activeKey], content, event_name };
         render(); 
+        
+        // Optionally sync back to Google Calendar if user has enabled it
+        // This would create/update events in Google Calendar based on notes
+        // For now, we'll just log that a save occurred
+        console.log(`Saved data for ${activeKey}`);
     } catch (err) {
         console.error("Save failed:", err);
     }
@@ -255,7 +399,10 @@ function render() {
                     ${showCycleDays ? `<div class="cycle-num">${i}</div>` : ''}
                     ${showRealDates ? `<div class="real-date">${run.getDate()}</div>` : ''}
                     ${inlineNote}
-                    <div class="dot-row">${dayData.content ? `<div class="dot dot-note"></div>` : ''}</div>
+                    <div class="dot-row">
+                        ${dayData.content ? `<div class="dot dot-note"></div>` : ''}
+                        ${dayData.event_name ? `<div class="dot" style="background: var(--event);"></div>` : ''}
+                    </div>
                 `;
 
                 d.onclick = (e) => {
@@ -308,6 +455,10 @@ async function init() {
 
     const saveBtn = document.getElementById('saveNoteBtn');
     if (saveBtn) saveBtn.onclick = saveData;
+
+    // Add Google sync button handler
+    const loginBtn = document.getElementById('loginBtn');
+    if (loginBtn) loginBtn.onclick = syncWithGoogle;
 
     document.getElementById('toggleRealDate').onchange = (e) => { showRealDates = e.target.checked; render(); };
     document.getElementById('toggleCycleNum').onchange = (e) => { showCycleDays = e.target.checked; render(); };
