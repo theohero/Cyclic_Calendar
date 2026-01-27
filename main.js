@@ -397,7 +397,7 @@ function render() {
 
                 d.innerHTML = `
                     ${showCycleDays ? `<div class="cycle-num">${i}</div>` : ''}
-                    ${showRealDates ? `<div class="real-date">${run.getDate()}</div>` : ''}
+                    ${showRealDates ? `<div class="real-date">${run.getDate()} ${run.toLocaleDateString('en-US', { month: 'short' })}</div>` : ''}
                     ${inlineNote}
                     <div class="dot-row">
                         ${dayData.content ? `<div class="dot dot-note"></div>` : ''}
