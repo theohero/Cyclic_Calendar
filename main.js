@@ -162,7 +162,7 @@ function loadGapi() {
         const checkGapi = () => {
             if (window.gapi) {
                 gapiLoaded = true;
-                window.gapi.load('client:auth2:calendar', {
+                window.gapi.load('client', {
                     callback: () => {
                         gapiReady = true;
                         resolve();
@@ -187,17 +187,28 @@ async function initGoogleAuth() {
     
     // Check if API keys are configured
     if (!import.meta.env.VITE_GOOGLE_API_KEY || !import.meta.env.VITE_GOOGLE_CLIENT_ID) {
-        throw new Error('Google API keys not configured. Please set VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLIENT_ID in your environment variables.');
+        alert('Google API keys not configured. Please set VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLIENT_ID in your environment variables.');
+        return null;
     }
     
-    await window.gapi.client.init({
-        apiKey: import.meta.env.VITE_GOOGLE_API_KEY,
-        clientId: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-        discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest"],
-        scope: "https://www.googleapis.com/auth/calendar"
-    });
+    try {
+        await window.gapi.client.init({
+            apiKey: import.meta.env.VITE_GOOGLE_API_KEY,
+            discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest"],
+        });
 
-    return window.gapi.auth2.getAuthInstance();
+        // Initialize the Google Identity Services library
+        const tokenClient = google.accounts.oauth2.initTokenClient({
+            client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+            scope: 'https://www.googleapis.com/auth/calendar.readonly',
+            callback: ''
+        });
+        
+        return tokenClient;
+    } catch (error) {
+        console.error('Error initializing Google API:', error);
+        return null;
+    }
 }
 
 async function syncWithGoogle() {
@@ -211,69 +222,85 @@ async function syncWithGoogle() {
     }
 
     try {
-        const authInstance = await initGoogleAuth();
-        const isSignedIn = authInstance.isSignedIn.get();
-        
-        if (!isSignedIn) {
-            // Sign in the user
-            await authInstance.signIn();
+        const tokenClient = await initGoogleAuth();
+        if (!tokenClient) {
+            throw new Error('Failed to initialize Google API');
         }
         
-        // Fetch events from Google Calendar
-        const response = await window.gapi.client.calendar.events.list({
-            calendarId: 'primary',
-            timeMin: (new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)).toISOString(), // Last 30 days
-            timeMax: (new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)).toISOString(), // Next 90 days
-            showDeleted: false,
-            singleEvents: true,
-            orderBy: 'startTime'
-        });
-
-        // Process events and save to our database
-        const events = response.result.items || [];
-        for (const event of events) {
-            const startDate = event.start.date || event.start.dateTime;
-            const dateObj = new Date(startDate);
-            const key = `${dateObj.getFullYear()}-${dateObj.getMonth()+1}-${dateObj.getDate()}`;
-            
-            // Update our local db with event info
-            if (!db[key]) {
-                db[key] = {};
-            }
-            
-            // Combine existing content with calendar event
-            const existingContent = db[key].content || '';
-            const eventContent = event.summary || '';
-            const eventDescription = event.description || '';
-            
-            // Only add the event if it's not already in the content
-            if (!existingContent.includes(eventContent)) {
-                const eventText = `${eventContent}${eventDescription ? ': ' + eventDescription : ''}`;
-                db[key].content = existingContent ? `${existingContent}\n${eventText}` : eventText;
-                db[key].event_name = eventContent;
+        // Request access token
+        return new Promise((resolve, reject) => {
+            tokenClient.callback = async (resp) => {
+                if (resp.error) {
+                    reject(new Error(resp.error));
+                    return;
+                }
                 
-                // Save to Supabase
-                await supabase.from('cyclic_notes').upsert({
-                    date_key: key,
-                    content: db[key].content,
-                    event_name: eventContent,
-                    tags: db[key].content.match(/#\w+/g) || []
-                });
-            }
-        }
-        
-        // Update UI
-        if (syncStatus) {
-            syncStatus.textContent = '☁ Synced';
-            syncStatus.style.color = 'green';
-            setTimeout(() => {
-                syncStatus.textContent = '☁';
-                syncStatus.style.color = '';
-            }, 2000);
-        }
-        
-        // Re-render the calendar
-        render();
+                try {
+                    // Fetch events from Google Calendar
+                    const response = await fetch(
+                        `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent((new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)).toISOString())}&timeMax=${encodeURIComponent((new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)).toISOString())}&showDeleted=false&singleEvents=true&orderBy=startTime&access_token=${resp.access_token}`
+                    );
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    const eventData = await response.json();
+                    
+                    // Process events and save to our database
+                    const events = eventData.items || [];
+                    for (const event of events) {
+                        const startDate = event.start.date || event.start.dateTime;
+                        const dateObj = new Date(startDate);
+                        const key = `${dateObj.getFullYear()}-${dateObj.getMonth()+1}-${dateObj.getDate()}`;
+                        
+                        // Update our local db with event info
+                        if (!db[key]) {
+                            db[key] = {};
+                        }
+                        
+                        // Combine existing content with calendar event
+                        const existingContent = db[key].content || '';
+                        const eventContent = event.summary || '';
+                        const eventDescription = event.description || '';
+                        
+                        // Only add the event if it's not already in the content
+                        if (!existingContent.includes(eventContent)) {
+                            const eventText = `${eventContent}${eventDescription ? ': ' + eventDescription : ''}`;
+                            db[key].content = existingContent ? `${existingContent}\n${eventText}` : eventText;
+                            db[key].event_name = eventContent;
+                            
+                            // Save to Supabase
+                            await supabase.from('cyclic_notes').upsert({
+                                date_key: key,
+                                content: db[key].content,
+                                event_name: eventContent,
+                                tags: db[key].content.match(/#\w+/g) || []
+                            });
+                        }
+                    }
+                    
+                    // Update UI
+                    if (syncStatus) {
+                        syncStatus.textContent = '☁ Synced';
+                        syncStatus.style.color = 'green';
+                        setTimeout(() => {
+                            syncStatus.textContent = '☁';
+                            syncStatus.style.color = '';
+                        }, 2000);
+                    }
+                    
+                    // Re-render the calendar
+                    render();
+                    resolve();
+                } catch (fetchError) {
+                    console.error('Error fetching calendar events:', fetchError);
+                    reject(fetchError);
+                }
+            };
+            
+            tokenClient.requestAccessToken({prompt: ''});
+        });
     } catch (error) {
         console.error('Error syncing with Google Calendar:', error);
         if (syncStatus) {
@@ -284,6 +311,8 @@ async function syncWithGoogle() {
                 syncStatus.style.color = '';
             }, 2000);
         }
+        // Still resolve to allow the isSyncing flag to reset
+        return Promise.resolve();
     } finally {
         isSyncing = false;
     }
@@ -462,6 +491,20 @@ async function init() {
 
     document.getElementById('toggleRealDate').onchange = (e) => { showRealDates = e.target.checked; render(); };
     document.getElementById('toggleCycleNum').onchange = (e) => { showCycleDays = e.target.checked; render(); };
+    
+    // Initialize anchor date input
+    const anchorDateInput = document.getElementById('anchorDateInput');
+    if (anchorDateInput) {
+        anchorDateInput.value = anchorDate.toISOString().split('T')[0];
+        anchorDateInput.onchange = (e) => {
+            const newDate = new Date(e.target.value);
+            if (!isNaN(newDate.getTime())) {
+                anchorDate = newDate;
+                localStorage.setItem('calendarAnchorDate', anchorDate.toISOString());
+                render();
+            }
+        };
+    }
     
     // Auth & Data Fetch
     const { data: { user } } = await supabase.auth.getUser();

@@ -125,6 +125,20 @@
         .bg-reset { background-color: rgba(245, 243, 255, 0.5); }
 
         .auth-btn { background: var(--accent); color: white; border: none; padding: 10px; border-radius: var(--radius); cursor: pointer; font-size: 14px; font-weight: 500; width: 100%; }
+        
+        #userProfile { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+        #avatarCircle { width: 40px; height: 40px; border: 2px solid black; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: white; }
+        
+        .settings-section { margin-top: 20px; }
+        .settings-header { font-size: 14px; font-weight: 600; color: var(--text-main); margin-bottom: 12px; }
+        .toggle-group { display: flex; flex-direction: column; gap: 12px; margin-bottom: 10px; }
+        .toggle-item { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; }
+        .toggle-item input[type="checkbox"] { width: auto; margin: 0; }
+        
+        .date-format-container { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+        .date-format-input { flex: 1; margin: 0; }
+        .calendar-icon { cursor: pointer; padding: 4px; border-radius: 4px; }
+        .calendar-icon:hover { background: var(--hover); }
 
         @media (max-width: 1400px) { #calContainer { grid-template-columns: repeat(2, 1fr); } }
         @media (max-width: 900px) { #calContainer { grid-template-columns: 1fr; } }
@@ -136,19 +150,22 @@
     <div id="syncStatus" title="Sync Status">☁</div>
 
     <div id="userProfile">
-        <img id="userAvatar" src="" alt="User">
+        <div id="avatarCircle"></div>
         <div id="userName">Not Signed In</div>
     </div>
 
     <button id="loginBtn" class="auth-btn">Sync with Google</button>
 
-    <div>
-        <div class="nav-label">Settings</div>
+    <div class="settings-section">
+        <div class="settings-header">SETTINGS</div>
         <div class="toggle-group">
             <label class="toggle-item"><input type="checkbox" id="toggleRealDate" checked> Dates</label>
             <label class="toggle-item"><input type="checkbox" id="toggleCycleNum"> Cycle Days</label>
         </div>
-        <input type="date" id="anchorDateInput" style="font-size: 12px;">
+        <div class="date-format-container">
+            <input type="date" id="anchorDateInput" class="date-format-input">
+            <div class="calendar-icon">📅</div>
+        </div>
     </div>
 
     <hr style="border: 0; border-top: 1px solid var(--border); width: 100%; margin: 4px 0;">
@@ -195,6 +212,15 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <!-- Load Google Calendar API -->
 <script src="https://apis.google.com/js/api.js" async defer></script>
+<script>
+    // Initialize Google Identity Services when the script loads
+    window.onload = function() {
+        // Make sure google object is available globally
+        if (typeof google === 'undefined') {
+            console.warn('Google Identity Services library not loaded');
+        }
+    };
+</script>
 <script type="module" src="/main.js"></script>
 </body>
 </html>
