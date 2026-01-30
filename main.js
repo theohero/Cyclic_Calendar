@@ -286,15 +286,21 @@ function handleWheel(e) {
         if (viewLevel < MAX_ZOOM_LEVEL) {
             const hDay = e.target.closest('.day');
             const hQuarter = e.target.closest('.quarter-group');
+            const hCycle = e.target.closest('.month-wrapper');
             
             let next = viewLevel;
             zoomTarget = null;
 
-            if (viewLevel === 0 && hQuarter) {
+            if (viewLevel === 0 && (hQuarter || hCycle)) {
                 // Year -> Quarter
+                const quarterEl = hQuarter || hCycle.closest('.quarter-group');
                 const all = [...document.querySelectorAll('.quarter-group')];
-                focusRefs.q = all.indexOf(hQuarter);
-                zoomTarget = { type: 'quarter', qIndex: focusRefs.q };
+                focusRefs.q = all.indexOf(quarterEl);
+                if (hCycle && hCycle.dataset.cycleIndex) {
+                    zoomTarget = { type: 'cycle', cycleIndex: parseInt(hCycle.dataset.cycleIndex, 10) };
+                } else {
+                    zoomTarget = { type: 'quarter', qIndex: focusRefs.q };
+                }
                 next = 1;
             } else if (viewLevel === 1 && hDay) {
                 // Quarter -> Week (Skipping Cycle)
@@ -343,6 +349,8 @@ function scrollToZoomTarget(target) {
     if (target.type === 'quarter') {
         const quarters = document.querySelectorAll('.quarter-group');
         element = quarters[target.qIndex] || null;
+    } else if (target.type === 'cycle') {
+        element = document.querySelector(`.month-wrapper[data-cycle-index="${target.cycleIndex}"]`) || null;
     } else if (target.type === 'week') {
         element = document.querySelector(`.week-day[data-key="${target.key}"]`) || document.querySelector('.week-wrapper');
     } else if (target.type === 'day') {
@@ -362,9 +370,12 @@ function smoothScrollToCenter(element) {
     const containerRect = container.getBoundingClientRect();
     const header = document.getElementById('zoomHeader');
     const headerHeight = header ? header.getBoundingClientRect().height : 0;
+    const style = getComputedStyle(container);
+    const padTop = parseFloat(style.paddingTop) || 0;
+    const padBottom = parseFloat(style.paddingBottom) || 0;
 
-    const visibleTop = containerRect.top + headerHeight;
-    const visibleHeight = Math.max(0, container.clientHeight - headerHeight);
+    const visibleTop = containerRect.top + headerHeight + padTop;
+    const visibleHeight = Math.max(0, container.clientHeight - headerHeight - padTop - padBottom);
 
     const targetLeft = container.scrollLeft + (rect.left - containerRect.left) - (container.clientWidth / 2) + (rect.width / 2);
     const targetTop = container.scrollTop + (rect.top - visibleTop) - (visibleHeight / 2) + (rect.height / 2);
@@ -621,10 +632,13 @@ function renderGrid(container) {
 
         const qDiv = document.createElement('div');
         qDiv.className = 'quarter-group';
+        qDiv.dataset.qIndex = q;
         
         timespans.slice(q*4, q*4+4).forEach((s) => {
             const wrapper = document.createElement('div');
             wrapper.className = 'month-wrapper';
+            wrapper.dataset.cycleIndex = (q * 4 + sIdx).toString();
+            wrapper.dataset.cycleName = s.name;
             const cls = s.name.includes('C1') ? 'bg-c1' : s.name.includes('C2') ? 'bg-c2' : s.name.includes('C3') ? 'bg-c3' : 'bg-reset';
             
             wrapper.innerHTML = `
