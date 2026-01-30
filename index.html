@@ -54,18 +54,23 @@
         input, textarea { width: 100%; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-size: 14px; background: var(--bg); color: var(--text-main); outline: none; box-sizing: border-box; }
 
         /* --- NOTES & LISTS --- */
-        #noteList { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-        .note-item { background: var(--bg); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius); cursor: grab; transition: all 0.2s ease; position: relative; }
-        .note-item:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        #noteList { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; flex: 1; overflow-y: auto; max-height: 300px; padding-right: 4px; }
+        .note-item { background: var(--bg); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius); cursor: grab; transition: all 0.2s ease; position: relative; user-select: none; overflow: visible; z-index: 10; }
+        .note-item:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.05); z-index: 20; }
+        .note-item:active { cursor: grabbing; }
+        .note-item.dragging { opacity: 0.5; }
+        .note-item.drag-over { border-top: 2px solid var(--accent); }
         .note-date-stamp { font-size: 10px; font-weight: 700; color: var(--accent); margin-bottom: 4px; text-transform: uppercase; }
         .note-preview { font-size: 13px; line-height: 1.4; color: var(--text-main); word-break: break-word; }
-        .tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; color: white; font-weight: 600; }
+        .note-tags { margin-top: 6px; }
+        .tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; color: white; font-weight: 600; display: inline-block; margin-right: 4px; margin-top: 4px; background: var(--accent); }
 
         /* --- MAIN VIEW & ZOOM LOGIC --- */
         #main { 
             flex-grow: 1; padding: 30px 40px; overflow-y: auto; 
             display: flex; flex-direction: column; align-items: stretch;
             transition: all 0.3s ease-in-out;
+            height: 100vh;
         }
 
         #zoomHeader { display: flex; align-items: center; gap: 15px; margin-bottom: 20px; }
@@ -79,27 +84,196 @@
             display: grid; grid-template-columns: repeat(4, 1fr); 
             gap: 24px; width: 100%; 
         }
+        .view-level-2 #calContainer { flex: 1; display: flex; }
+        .view-level-2 .week-wrapper { flex: 1; }
 
         /* ZOOM LEVEL STYLES */
         .view-level-1 #calContainer { grid-template-columns: 1fr; }
-        .view-level-2 #calContainer { grid-template-columns: 1fr; }
+        .view-level-2 #calContainer { grid-template-columns: 1fr; max-width: none; }
         .view-level-3 #calContainer { grid-template-columns: 1fr; }
 
-        /* WEEK VIEW (Level 3): Show Notes inside boxes */
-        .view-level-3 .day { height: auto; min-height: 180px; padding: 10px; }
+        /* CYCLE VIEW (Level 2): Show Notes inside boxes */
+        .view-level-2 .day { height: auto; min-height: 140px; padding: 10px; overflow-y: auto; max-height: 200px; }
         .day-content-preview { 
-            display: none; font-size: 12px; margin-top: 25px; line-height: 1.4;
-            color: var(--text-main); white-space: pre-wrap;
+            display: none; font-size: 12px; margin-top: 8px; line-height: 1.4;
+            color: var(--text-main); white-space: pre-wrap; overflow-y: auto; max-height: 100px; border: 1px solid rgba(128, 128, 128, 0.2); border-radius: 3px; padding: 6px;
         }
-        .view-level-3 .day-content-preview { display: block; }
+        .view-level-2 .day-content-preview { display: block; }
+        .day-note-item { background: var(--accent-soft); border-left: 3px solid var(--accent); padding: 10px; border-radius: 4px; margin-bottom: 8px; position: relative; }
+        .day-note-content { font-size: 13px; line-height: 1.5; color: var(--text-main); word-break: break-word; white-space: pre-wrap; }
+        #dayOverview { margin-top: 24px; padding: 16px; background: var(--accent-soft); border-radius: var(--radius); max-height: 400px; overflow-y: auto; }
+
+        /* WEEK VIEW (Level 3) */
+        .week-wrapper { 
+            display: flex; 
+            flex-direction: row; 
+            gap: 12px; 
+            width: 100%; 
+            height: 100%; /* Fill parent container */
+        }
+        .week-day { 
+            background: var(--bg); 
+            border: 1px solid var(--border); 
+            border-radius: var(--radius); 
+            padding: 12px 14px; 
+            flex: 1; /* Equal width for all days */
+            display: flex; 
+            flex-direction: column; 
+            gap: 8px;
+            min-width: 0; /* Allow shrinking */
+        }
+        .week-day.is-today { outline: 2px solid var(--accent); }
+        .week-day-header { 
+            display: flex; 
+            flex-direction: column;
+            gap: 4px;
+            flex-shrink: 0; /* Don't shrink header */
+        }
+        .week-day-title { font-weight: 700; font-size: 14px; }
+        .week-day-date { font-size: 12px; color: var(--text-light); }
+        .week-day-notes { 
+            flex: 1; 
+            overflow-y: auto; 
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        /* Individual Note Items with Drag & Drop */
+        .week-note-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            background: var(--accent-soft);
+            border-left: 3px solid var(--accent);
+            border-radius: 6px;
+            padding: 8px;
+            margin-bottom: 8px;
+            transition: all 0.2s ease;
+            cursor: move;
+        }
+        .week-note-item:hover {
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .week-note-item.dragging {
+            opacity: 0.5;
+            transform: scale(0.98);
+        }
+        .week-note-item.drag-over {
+            border-top: 2px solid var(--accent);
+            padding-top: 12px;
+        }
+        
+        .note-drag-handle {
+            cursor: grab;
+            color: var(--text-light);
+            font-size: 14px;
+            line-height: 1;
+            padding: 2px 0;
+            user-select: none;
+        }
+        .note-drag-handle:active {
+            cursor: grabbing;
+        }
+        
+        .note-content-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        
+        .note-content {
+            font-size: 13px;
+            line-height: 1.5;
+            color: var(--text-main);
+            word-wrap: break-word;
+            white-space: pre-wrap;
+            outline: none;
+            min-height: 20px;
+        }
+        .note-content:focus {
+            background: rgba(255,255,255,0.05);
+            border-radius: 4px;
+            padding: 4px;
+        }
+        
+        .note-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-top: 4px;
+        }
+        
+        .tag {
+            background: var(--accent);
+            color: #000;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .note-delete-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px 4px;
+            opacity: 0.5;
+            transition: opacity 0.2s;
+            flex-shrink: 0;
+        }
+        .note-delete-btn:hover {
+            opacity: 1;
+        }
+        
+        .week-note.empty { 
+            border-left-color: var(--border); 
+            color: var(--text-light); 
+            background: transparent; 
+            padding: 12px;
+        }
+        
+        .week-day-actions { 
+            display: flex; 
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+        }
+        
+        .add-note-btn {
+            background: var(--hover);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 6px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--text-main);
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .add-note-btn:hover {
+            background: var(--accent);
+            color: white;
+            border-color: var(--accent);
+        }
 
         /* DAY VIEW (Level 4): Fullscreen Overlay */
         #dayFocusView {
             display: none; position: fixed; top: 0; left: 320px; right: 0; bottom: 0;
-            background: var(--bg); z-index: 100; padding: 60px; overflow-y: auto;
+            background: var(--bg); z-index: 100; padding: 40px 60px; overflow-y: auto;
         }
         .view-level-4 #dayFocusView { display: block; }
-        .day-focus-header { font-size: 32px; font-weight: 800; margin-bottom: 10px; }
+        .day-focus-header { font-size: 32px; font-weight: 800; margin-bottom: 8px; }
+        .day-note-item { background: var(--accent-soft); border-left: 4px solid var(--accent); padding: 12px; border-radius: 6px; margin-bottom: 10px; position: relative; }
+        .day-note-content { font-size: 13px; line-height: 1.6; color: var(--text-main); word-break: break-word; white-space: pre-wrap; }
 
         /* --- CALENDAR COMPONENTS --- */
         .quarter-group { display: flex; flex-direction: column; gap: 32px; }
@@ -155,16 +329,14 @@
     </div>
 
     <button id="loginBtn" class="auth-btn">Sync with Google</button>
+    <button id="logoutBtn" class="auth-btn" style="display:none; margin-top: 8px; background: transparent; color: var(--text-light); border: 1px solid var(--border);">Logout</button>
+
 
     <div class="settings-section">
         <div class="settings-header">SETTINGS</div>
         <div class="toggle-group">
             <label class="toggle-item"><input type="checkbox" id="toggleRealDate" checked> Dates</label>
             <label class="toggle-item"><input type="checkbox" id="toggleCycleNum"> Cycle Days</label>
-        </div>
-        <div class="date-format-container">
-            <input type="date" id="anchorDateInput" class="date-format-input">
-            <div class="calendar-icon">📅</div>
         </div>
     </div>
 
@@ -187,7 +359,12 @@
     <div class="nav-label" style="margin-top: 10px;">Recent Notes</div>
     <div id="noteList"></div>
 
-    <button id="exportBtn" style="margin-top: auto; background: none; border: 1px solid var(--border); padding: 8px; border-radius: var(--radius); cursor: pointer; color: var(--text-light); font-size: 11px;">
+    <div class="date-format-container" style="margin-top: auto; margin-bottom: 10px;">
+        <input type="date" id="anchorDateInput" class="date-format-input">
+        <div class="calendar-icon">📅</div>
+    </div>
+
+    <button id="exportBtn" style="background: none; border: 1px solid var(--border); padding: 8px; border-radius: var(--radius); cursor: pointer; color: var(--text-light); font-size: 11px; width: 100%;">
         Export JSON
     </button>
 </div>
@@ -204,8 +381,9 @@
         <button onclick="document.getElementById('zoomOutBtn').click()" style="background:none; border:none; color:var(--accent); cursor:pointer; font-weight:600; margin-bottom:20px;">← Close Focus</button>
         <div id="dayFocusHeader" class="day-focus-header"></div>
         <div id="dayFocusSubheader" class="nav-label" style="font-size: 14px; margin-bottom: 30px;"></div>
-        <textarea id="focusNoteArea" style="width: 100%; height: 300px; font-size: 18px; line-height: 1.6; padding: 20px; margin-bottom: 20px; resize: vertical;"></textarea>
-        <button id="saveFromFocusBtn" style="background: var(--accent); color: white; border: none; padding: 10px 20px; border-radius: var(--radius); cursor: pointer; font-weight: 600;">Save Note</button>
+        <textarea id="focusNoteArea" style="width: 100%; height: 200px; font-size: 16px; line-height: 1.6; padding: 16px; margin-bottom: 16px; resize: none; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--text-main);"></textarea>
+        <button id="saveFromFocusBtn" style="background: var(--accent); color: white; border: none; padding: 10px 20px; border-radius: var(--radius); cursor: pointer; font-weight: 600; margin-bottom: 20px;">Save Note</button>
+        <div id="dayOverview"></div>
     </div>
 </div>
 

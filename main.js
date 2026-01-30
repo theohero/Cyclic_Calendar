@@ -1,26 +1,31 @@
 import { createClient } from '@supabase/supabase-js'
 
+// --- CONFIGURATION ---
 const supabase = createClient(
     import.meta.env.VITE_SUPABASE_URL,
     import.meta.env.VITE_SUPABASE_ANON_KEY
 )
 
-let db = {};
-let activeKey = null;
+const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/userinfo.profile';
+
+// --- GLOBAL STATE ---
+let db = {}; // Will now store: { date_key: { notes: [{id, content, position}], event_name, tags } }
+let activeKey = null; 
+let pendingNoteContent = ''; 
 let showRealDates = true;  
 let showCycleDays = false; 
 
-// GOOGLE SYNC STATE
-let gapiLoaded = false;
-let gapiReady = false;
-let isSyncing = false;
-
-// ZOOM STATE
+// UI State
+// Levels: 0=Year, 1=Quarter, 2=Week (formerly 3), 3=Day (formerly 4)
+// Removed the "Single Cycle" (Month-like) view as requested.
+const MAX_ZOOM_LEVEL = 3;
 let viewLevel = 0; 
-let focusRefs = { q: null, cycleIdx: null, weekNum: null };
-let isZooming = false; // Debounce flag
+let focusRefs = { q: null }; // Only need Quarter focus for Level 1
+let isZooming = false;
+let isSyncing = false;
+let gapiReady = false;
 
-const tagColors = {};
+// Calendar Data
 let anchorDate = new Date(localStorage.getItem('calendarAnchorDate') || '2025-12-29');
 
 const timespans = [
@@ -30,13 +35,239 @@ const timespans = [
     {name: "Q4C1", len: 28}, {name: "Q4C2", len: 28}, {name: "Q4C3", len: 28}, {name: "Reset 4", len: 7}
 ];
 
-// --- ZOOM LOGIC ---
+
+// --- INIT ---
+async function init() {
+    setupEventListeners();
+    
+    // Unconditional data load (fixes "notes disappear")
+    await loadNotesFromSupabase();
+    
+    // Force migration check
+    await migrateOldNotes();
+    
+    // Restore session & Background Sync
+    restoreUserSession();
+
+    // Initial UI
+    render();
+    updateZoomUI();
+    updateNoteList();
+}
+
+function setupEventListeners() {
+    const main = document.getElementById('main');
+    if (main) main.addEventListener('wheel', handleWheel, { passive: false });
+    
+    bindClick('zoomOutBtn', zoomOut);
+    bindClick('saveNoteBtn', saveData);
+    bindClick('saveFromFocusBtn', saveFromFocus);
+    bindClick('loginBtn', () => syncWithGoogle(false));
+    bindClick('logoutBtn', logout);
+
+    const tReal = document.getElementById('toggleRealDate');
+    if (tReal) tReal.onchange = (e) => { showRealDates = e.target.checked; render(); };
+    
+    const tCycle = document.getElementById('toggleCycleNum');
+    if (tCycle) tCycle.onchange = (e) => { showCycleDays = e.target.checked; render(); };
+    
+    const noteArea = document.getElementById('noteArea');
+    if (noteArea) {
+        noteArea.addEventListener('input', () => { pendingNoteContent = noteArea.value; });
+        // Add Ctrl+Enter to save
+        noteArea.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                saveData();
+            }
+        });
+    }
+
+    const anchorInput = document.getElementById('anchorDateInput');
+    if (anchorInput) {
+        anchorInput.value = anchorDate.toISOString().split('T')[0];
+        anchorInput.onchange = (e) => {
+            const d = new Date(e.target.value);
+            if (!isNaN(d.getTime())) {
+                anchorDate = d;
+                localStorage.setItem('calendarAnchorDate', d.toISOString());
+                render();
+            }
+        };
+    }
+
+    const search = document.getElementById('tagSearch');
+    if (search) search.addEventListener('input', (e) => renderNoteList(e.target.value));
+}
+
+function bindClick(id, fn) {
+    const el = document.getElementById(id);
+    if (el) el.onclick = fn;
+}
+
+// --- DATA & AUTH ---
+
+async function loadNotesFromSupabase() {
+    try {
+        // Load individual notes
+        const { data: noteItems, error: notesError } = await supabase
+            .from('cyclic_note_items')
+            .select('*')
+            .order('position', { ascending: true });
+        
+        if (notesError) throw notesError;
+
+        // Structure data by date_key
+        db = {};
+        
+        // Add notes from new table
+        if (noteItems) {
+            noteItems.forEach(item => {
+                if (!db[item.date_key]) {
+                    db[item.date_key] = { notes: [], event_name: '', tags: [] };
+                }
+                db[item.date_key].notes.push({
+                    id: item.id,
+                    content: item.content,
+                    position: item.position
+                });
+            });
+        }
+
+    } catch (err) {
+        console.error("Failed to load notes:", err);
+    }
+}
+
+// Migration function to convert old notes to new format
+async function migrateOldNotes() {
+    // Force migration for debugging
+    console.log("Forcing migration check...");
+    
+    try {
+        console.log("Starting migration...");
+        
+        // Fetch old notes
+        const { data: oldNotes, error } = await supabase
+            .from('cyclic_notes')
+            .select('date_key, content');
+        
+        if (error) {
+            console.error("Error fetching old notes:", error);
+            return;
+        }
+        
+        console.log("Old notes found:", oldNotes);
+        
+        if (!oldNotes || oldNotes.length === 0) {
+            console.log("No old notes to migrate");
+            return;
+        }
+        
+        // Check if new table already has data
+        const { data: existingNotes } = await supabase
+            .from('cyclic_note_items')
+            .select('id')
+            .limit(1);
+        
+        console.log("Existing notes in new table:", existingNotes);
+        
+        if (existingNotes && existingNotes.length > 0) {
+            console.log("New notes already exist, skipping migration");
+            return;
+        }
+        
+        // Migrate each old note
+        let migratedCount = 0;
+        for (const oldNote of oldNotes) {
+            if (!oldNote.content || oldNote.content.trim() === '') continue;
+            
+            // Split content by newlines (each line becomes a note)
+            const lines = oldNote.content.split('\n').filter(line => line.trim() !== '');
+            
+            console.log(`Migrating note for ${oldNote.date_key}: ${lines.length} lines`);
+            
+            for (let i = 0; i < lines.length; i++) {
+                const { error: insertError } = await supabase
+                    .from('cyclic_note_items')
+                    .insert({
+                        date_key: oldNote.date_key,
+                        content: lines[i].trim(),
+                        position: i
+                    });
+                
+                if (insertError) {
+                    console.error("Error migrating note:", insertError);
+                } else {
+                    migratedCount++;
+                }
+            }
+        }
+        
+        console.log(`Migration complete! Migrated ${migratedCount} notes.`);
+        
+        // Reload data
+        await loadNotesFromSupabase();
+        render();
+        alert(`Migration complete! Migrated ${migratedCount} notes.`);
+        
+    } catch (err) {
+        console.error("Migration failed:", err);
+    }
+}
+
+function restoreUserSession() {
+    const token = localStorage.getItem('googleAccessToken');
+    const name = localStorage.getItem('userName');
+    const avatar = localStorage.getItem('userAvatar');
+
+    if (token) {
+        updateAuthUI(true, name, avatar);
+        syncWithGoogle(true); // Background sync to keep fresh
+    } else {
+        updateAuthUI(false);
+    }
+}
+
+function updateAuthUI(isLoggedIn, name, avatar) {
+    const login = document.getElementById('loginBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const uName = document.getElementById('userName');
+    const uAvatar = document.getElementById('avatarCircle');
+
+    if (isLoggedIn) {
+        if (login) login.style.display = 'none';
+        if (logoutBtn) logoutBtn.style.display = 'block';
+        if (uName) uName.textContent = name || 'User';
+        if (uAvatar && avatar) {
+            uAvatar.innerHTML = `<img src="${avatar}" alt="${name}" style="width:100%; height:100%; border-radius:50%; object-fit:cover;">`;
+        }
+    } else {
+        if (login) login.style.display = 'block';
+        if (logoutBtn) logoutBtn.style.display = 'none';
+        if (uName) uName.textContent = 'Not Signed In';
+        if (uAvatar) uAvatar.innerHTML = '';
+    }
+}
+
+function logout() {
+    localStorage.removeItem('googleAccessToken');
+    localStorage.removeItem('userName');
+    localStorage.removeItem('userAvatar');
+    updateAuthUI(false);
+    console.log("Logged out.");
+}
+
+// --- ZOOM LOGIC (Refactored) ---
+// 0: Year, 1: Quarter, 2: Week, 3: Day
+
+let zoomTargetElement = null;
 
 function updateZoomUI() {
     const main = document.getElementById('main');
-    main.className = `view-level-${viewLevel}`;
-    const backBtn = document.getElementById('zoomOutBtn');
-    if (backBtn) backBtn.style.display = viewLevel > 0 ? 'block' : 'none';
+    if (main) main.className = `view-level-${viewLevel}`;
+    const btn = document.getElementById('zoomOutBtn');
+    if (btn) btn.style.display = viewLevel > 0 ? 'block' : 'none';
 }
 
 function zoomOut() {
@@ -47,44 +278,44 @@ function zoomOut() {
     }
 }
 
-/**
- * WHEEL HANDLER
- * deltaY < 0 is Scroll Up (Zoom In)
- * deltaY > 0 is Scroll Down (Zoom Out)
- */
 function handleWheel(e) {
-    e.preventDefault(); // Stop page from jumping
+    e.preventDefault();
     if (isZooming) return;
 
-    if (e.deltaY < 0) {
-        // ZOOM IN
-        if (viewLevel < 4) { // Max level is now 4
-            const hoveredDay = e.target.closest('.day');
-            const hoveredCycle = e.target.closest('.month-wrapper');
-            const hoveredQuarter = e.target.closest('.quarter-group');
+    if (e.deltaY < 0) { // Zoom In
+        if (viewLevel < MAX_ZOOM_LEVEL) {
+            const hDay = e.target.closest('.day');
+            const hQuarter = e.target.closest('.quarter-group');
+            
+            let next = viewLevel;
+            zoomTargetElement = null;
 
-            if (viewLevel === 0 && hoveredQuarter) {
-                const allQs = [...document.querySelectorAll('.quarter-group')];
-                focusRefs.q = allQs.indexOf(hoveredQuarter);
-                viewLevel = 1;
-            } 
-            else if (viewLevel === 1 && hoveredCycle) {
-                const allCs = [...document.querySelectorAll('.month-wrapper')];
-                focusRefs.cycleIdx = allCs.indexOf(hoveredCycle);
-                viewLevel = 2;
+            if (viewLevel === 0 && hQuarter) {
+                // Year -> Quarter
+                const all = [...document.querySelectorAll('.quarter-group')];
+                focusRefs.q = all.indexOf(hQuarter);
+                zoomTargetElement = hQuarter;
+                next = 1;
+            } else if (viewLevel === 1 && hDay) {
+                // Quarter -> Week (Skipping Cycle)
+                savePendingNote();
+                activeKey = hDay.dataset.key;
+                zoomTargetElement = hDay;
+                next = 2; // Jump to Week
+            } else if (viewLevel === 2 && hDay) {
+                // Week -> Day
+                savePendingNote();
+                activeKey = hDay.dataset.key;
+                zoomTargetElement = hDay;
+                next = 3;
             }
-            else if (viewLevel === 2 && hoveredDay) {
-                activeKey = hoveredDay.dataset.key;
-                viewLevel = 3; // Week view
+
+            if (next !== viewLevel) {
+                viewLevel = next;
+                executeZoom();
             }
-            else if (viewLevel === 3 && hoveredDay) {
-                activeKey = hoveredDay.dataset.key;
-                viewLevel = 4; // Day Focus view
-            }
-            executeZoom();
         }
-    } else {
-        // ZOOM OUT
+    } else { // Zoom Out
         if (viewLevel > 0) {
             viewLevel--;
             executeZoom();
@@ -96,24 +327,358 @@ function executeZoom() {
     isZooming = true;
     render();
     updateZoomUI();
-    // Debounce to prevent level skipping
-    setTimeout(() => { isZooming = false; }, 200);
+    
+    // After render completes, smooth scroll to center the zoomed element
+    setTimeout(() => {
+        smoothScrollToCenter(zoomTargetElement);
+        zoomTargetElement = null;
+        setTimeout(() => { isZooming = false; }, 600); // Wait for animation
+    }, 50);
 }
 
-// --- HELPER FUNCTIONS ---
+function smoothScrollToCenter(element) {
+    if (!element) return;
+    
+    const container = document.getElementById('main');
+    if (!container) return;
+    
+    // Calculate element's position relative to container
+    const rect = element.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    
+    // Target scroll position to center the element
+    const scrollLeft = element.offsetLeft - (container.clientWidth / 2) + (element.offsetWidth / 2);
+    const scrollTop = element.offsetTop - (container.clientHeight / 2) + (element.offsetHeight / 2);
+    
+    // Animate scroll with ease-in-out timing
+    const startX = container.scrollLeft;
+    const startY = container.scrollTop;
+    const deltaX = scrollLeft - startX;
+    const deltaY = scrollTop - startY;
+    const duration = 500; // 500ms animation
+    const startTime = performance.now();
+    
+    function easeInOutCubic(t) {
+        // Smooth easing with slight bounce effect
+        return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    }
+    
+    function animate(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        const easeProgress = easeInOutCubic(progress);
+        
+        container.scrollLeft = startX + deltaX * easeProgress;
+        container.scrollTop = startY + deltaY * easeProgress;
+        
+        if (progress < 1) {
+            requestAnimationFrame(animate);
+        }
+    }
+    
+    requestAnimationFrame(animate);
+}
 
-function getFormattedCyclicDate(targetDateKey) {
+// --- RENDER ENGINE ---
+
+function render() {
+    const container = document.getElementById('calContainer');
+    if (!container) return;
+    container.innerHTML = "";
+
+    if (viewLevel === 3) {
+        renderDayFocus();
+        return;
+    }
+    if (viewLevel === 2) {
+        renderWeekView(container);
+        return;
+    }
+    
+    renderGrid(container);
+}
+
+function renderDayFocus() {
+    if (!activeKey) return;
+    const [y, m, d] = activeKey.split('-').map(Number);
+    const date = new Date(y, m-1, d);
+
+    setText('dayFocusHeader', date.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }));
+    setText('dayFocusSubheader', getFormattedCyclicDate(activeKey));
+
+    // Note: This view is for the old "add note" textarea if needed
+    // The main display uses the week view which shows individual notes
+}
+
+function renderWeekView(container) {
+    if (!activeKey) {
+        container.innerHTML = '<div style="padding: 20px; color: red;">No activeKey set for week view</div>';
+        return;
+    }
+    const info = getCycleInfoForKey(activeKey);
+    if (!info) {
+        container.innerHTML = `<div style="padding: 20px; color: red;">No cycle info for activeKey: ${activeKey}</div>`;
+        return;
+    }
+
+    const start = new Date(info.cycleStart);
+    start.setDate(start.getDate() + Math.floor(info.dayInCycle / 7) * 7);
+    
+    const wrapper = document.createElement('div');
+    wrapper.className = 'week-wrapper';
+
+    for (let i = 0; i < 7; i++) {
+        const d = new Date(start);
+        d.setDate(d.getDate() + i);
+        const key = getKey(d);
+        const dayData = db[key] || { notes: [] };
+        
+        const el = document.createElement('div');
+        el.className = `week-day ${key === getTodayKey() ? 'is-today' : ''} ${key === activeKey ? 'active' : ''}`;
+        el.dataset.key = key;
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'week-day-header';
+        header.innerHTML = `
+            <div class="week-day-title">${d.toLocaleDateString('en-US', {weekday:'long'})}</div>
+            <div class="week-day-date">${d.toLocaleDateString('en-US', {month:'short', day:'numeric'})}</div>
+            <div style="font-size: 10px; color: #666;">Key: ${key}</div>
+            <div style="font-size: 10px; color: #666;">Notes: ${dayData.notes ? dayData.notes.length : 0}</div>
+        `;
+        el.appendChild(header);
+
+        // Notes area
+        const notesArea = document.createElement('div');
+        notesArea.className = 'week-day-notes';
+        notesArea.dataset.dateKey = key;
+
+        if (dayData.notes && dayData.notes.length > 0) {
+            dayData.notes.forEach((note, index) => {
+                const noteEl = createNoteElement(note, key, index);
+                notesArea.appendChild(noteEl);
+            });
+        } else {
+            notesArea.innerHTML = '<div class="week-note empty">No notes</div>';
+        }
+
+        el.appendChild(notesArea);
+
+        // Add note button
+        const actions = document.createElement('div');
+        actions.className = 'week-day-actions';
+        actions.innerHTML = `<button class="add-note-btn" data-key="${key}">+ Add Note</button>`;
+        el.appendChild(actions);
+
+        wrapper.appendChild(el);
+    }
+    
+    container.appendChild(wrapper);
+    attachWeekViewHandlers();
+}
+
+function createNoteElement(note, dateKey, index) {
+    const noteEl = document.createElement('div');
+    noteEl.className = 'week-note-item';
+    noteEl.draggable = true;
+    noteEl.dataset.noteId = note.id;
+    noteEl.dataset.dateKey = dateKey;
+    noteEl.dataset.position = note.position;
+    
+    // Extract tags from content (support dashes, underscores)
+    const content = note.content || '';
+    const tags = content.match(/#[\w-]+/g) || [];
+    const textWithoutTags = content.replace(/#[\w-]+/g, '').trim();
+    
+    // Generate color for each tag
+    const tagsHtml = tags.length > 0 
+        ? `<div class="note-tags">${tags.map(tag => {
+            const color = getTagColor(tag);
+            return `<span class="tag" style="background: ${color.bg}; color: ${color.text}">${tag}</span>`;
+        }).join('')}</div>`
+        : '';
+    
+    noteEl.innerHTML = `
+        <div class="note-drag-handle">⋮⋮</div>
+        <div class="note-content-wrapper">
+            <div class="note-content" contenteditable="true">${textWithoutTags}</div>
+            ${tagsHtml}
+        </div>
+        <button class="note-delete-btn" data-note-id="${note.id}" data-date-key="${dateKey}">🗑️</button>
+    `;
+    
+    return noteEl;
+}
+
+// Generate consistent color for a tag
+function getTagColor(tag) {
+    const colorPairs = [
+        { bg: '#FFE6E6', text: '#8B0000' }, // light red bg, dark red text
+        { bg: '#FFE6F0', text: '#8B004B' }, // light pink bg, dark pink text
+        { bg: '#F0E6FF', text: '#4B008B' }, // light purple bg, dark purple text
+        { bg: '#E6E6FF', text: '#00008B' }, // light indigo bg, dark indigo text
+        { bg: '#E6F0FF', text: '#003D8B' }, // light blue bg, dark blue text
+        { bg: '#E6F7FF', text: '#006B8B' }, // light sky bg, dark sky text
+        { bg: '#E6FFFF', text: '#008B8B' }, // light cyan bg, dark cyan text
+        { bg: '#E6FFF0', text: '#008B4B' }, // light teal bg, dark teal text
+        { bg: '#E6FFE6', text: '#006400' }, // light green bg, dark green text
+        { bg: '#F0FFE6', text: '#4B8B00' }, // light lime bg, dark lime text
+        { bg: '#FFFFE6', text: '#8B8B00' }, // light yellow bg, dark yellow text
+        { bg: '#FFF7E6', text: '#8B6B00' }, // light gold bg, dark gold text
+        { bg: '#FFE6D9', text: '#8B4500' }, // light orange bg, dark orange text
+        { bg: '#FFE6E0', text: '#8B2500' }, // light coral bg, dark coral text
+        { bg: '#F5E6FF', text: '#6B008B' }, // light violet bg, dark violet text
+        { bg: '#FFE6F7', text: '#8B0066' }, // light magenta bg, dark magenta text
+        { bg: '#E6F5FF', text: '#004D8B' }, // light azure bg, dark azure text
+        { bg: '#E6FFEB', text: '#00663D' }, // light mint bg, dark mint text
+        { bg: '#FFF0E6', text: '#8B5A00' }, // light peach bg, dark peach text
+        { bg: '#F0E6E6', text: '#663333' }, // light brown bg, dark brown text
+    ];
+    
+    let hash = 0;
+    for (let i = 0; i < tag.length; i++) {
+        hash = tag.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    return colorPairs[Math.abs(hash) % colorPairs.length];
+}
+
+function attachWeekViewHandlers() {
+    // Add note buttons
+    document.querySelectorAll('.add-note-btn').forEach(btn => {
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            const key = btn.dataset.key;
+            await addNewNote(key);
+        };
+    });
+
+    // Delete buttons
+    document.querySelectorAll('.note-delete-btn').forEach(btn => {
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            const noteId = btn.dataset.noteId;
+            const dateKey = btn.dataset.dateKey;
+            await deleteNoteItem(noteId, dateKey);
+        };
+    });
+
+    // Content editing
+    document.querySelectorAll('.note-content').forEach(content => {
+        content.addEventListener('blur', async (e) => {
+            const noteEl = e.target.closest('.week-note-item');
+            const noteId = noteEl.dataset.noteId;
+            const newContent = e.target.textContent.trim();
+            await updateNoteContent(noteId, newContent);
+        });
+    });
+
+    // Drag and drop
+    const noteItems = document.querySelectorAll('.week-note-item');
+    noteItems.forEach(item => {
+        item.addEventListener('dragstart', handleDragStart);
+        item.addEventListener('dragover', handleDragOver);
+        item.addEventListener('drop', handleDrop);
+        item.addEventListener('dragend', handleDragEnd);
+    });
+}
+
+function renderGrid(container) {
+    const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const today = getTodayKey();
+    let run = new Date(anchorDate);
+
+    for (let q = 0; q < 4; q++) {
+        // Level 1: Only show focused quarter
+        if (viewLevel === 1 && focusRefs.q !== q) {
+            timespans.slice(q*4, q*4+4).forEach(s => run.setDate(run.getDate() + s.len));
+            continue;
+        }
+
+        const qDiv = document.createElement('div');
+        qDiv.className = 'quarter-group';
+        
+        timespans.slice(q*4, q*4+4).forEach((s) => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'month-wrapper';
+            const cls = s.name.includes('C1') ? 'bg-c1' : s.name.includes('C2') ? 'bg-c2' : s.name.includes('C3') ? 'bg-c3' : 'bg-reset';
+            
+            wrapper.innerHTML = `
+                <div class="month-header ${cls}">${s.name}</div>
+                <div class="weekday-header">${weekDays.map(d => `<div>${d}</div>`).join('')}</div>
+                <div class="month-grid"></div>
+            `;
+            const grid = wrapper.querySelector('.month-grid');
+
+            for (let i = 1; i <= s.len; i++) {
+                const key = getKey(run);
+                const data = db[key] || {};
+                const dayEl = document.createElement('div');
+                dayEl.className = `day ${cls} ${key === today ? 'is-today' : ''} ${key === activeKey ? 'active' : ''}`;
+                dayEl.dataset.key = key;
+                dayEl.onclick = (e) => handleDayClick(e, key, data); 
+
+                dayEl.innerHTML = `
+                    ${showCycleDays ? `<div class="cycle-num">${i}</div>` : ''}
+                    ${showRealDates ? `<div class="real-date">${run.getDate()} ${run.toLocaleDateString('en-US',{month:'short'})}</div>` : ''}
+                    <div class="dot-row">
+                        ${data.notes && data.notes.length > 0 ? '<div class="dot dot-note"></div>' : ''}
+                        ${data.event_name ? '<div class="dot" style="background:var(--event);"></div>' : ''}
+                    </div>
+                `;
+                grid.appendChild(dayEl);
+                run.setDate(run.getDate() + 1);
+            }
+            qDiv.appendChild(wrapper);
+        });
+        container.appendChild(qDiv);
+    }
+}
+
+function handleDayClick(e, key, data) {
+    e.stopPropagation();
+    savePendingNote();
+    activeKey = key;
+    updateSelectionUI(key, data);
+    render();
+}
+
+// --- HELPERS ---
+
+function getKey(d) { return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`; }
+function getTodayKey() { return getKey(new Date()); }
+function setText(id, txt) { const el = document.getElementById(id); if(el) el.textContent = txt; }
+
+function savePendingNote() {
+    const area = document.getElementById('noteArea');
+    if (area && area.value) pendingNoteContent = area.value;
+}
+
+function updateSelectionUI(key, data) {
+    setText('selLabel', `${key} (${getFormattedCyclicDate(key)})`);
+    const area = document.getElementById('noteArea');
+    if (area) {
+        // Clear textarea for adding new notes
+        area.value = '';
+        area.placeholder = 'Type here to add a new note...';
+    }
+    const evt = document.getElementById('eventInput');
+    if (evt) evt.value = data.event_name || '';
+    
+    // Update the note list sidebar with individual notes
+    updateNoteList();
+}
+
+function getFormattedCyclicDate(targetKey) {
     let run = new Date(anchorDate);
     for (let q = 0; q < 4; q++) {
         for (let sIdx = 0; sIdx < 4; sIdx++) {
-            const span = timespans[q * 4 + sIdx];
+            const span = timespans[q*4+sIdx];
             for (let d = 1; d <= span.len; d++) {
-                const key = `${run.getFullYear()}-${run.getMonth()+1}-${run.getDate()}`;
-                if (key === targetDateKey) {
-                    const week = Math.ceil(d / 7);
-                    const dayInWeek = ((d - 1) % 7) + 1;
-                    const cyclePart = span.name.includes('Reset') ? 'R' : span.name.split('Q' + (q+1))[1];
-                    return `Q${q+1}.${cyclePart}.W${week}.D${dayInWeek}`;
+                if (getKey(run) === targetKey) {
+                    const w = Math.ceil(d/7);
+                    const dw = ((d-1)%7)+1;
+                    const c = span.name.includes('Reset') ? 'R' : span.name.split('Q'+(q+1))[1];
+                    return `Q${q+1}.${c}.W${w}.D${dw}`;
                 }
                 run.setDate(run.getDate() + 1);
             }
@@ -122,413 +687,555 @@ function getFormattedCyclicDate(targetDateKey) {
     return "";
 }
 
-// --- GOOGLE CALENDAR SYNC ---
-
-function loadGapi() {
-    return new Promise((resolve, reject) => {
-        const checkGapi = () => {
-            if (window.gapi) {
-                gapiLoaded = true;
-                window.gapi.load('client', {
-                    callback: () => {
-                        gapiReady = true;
-                        resolve();
-                    },
-                    onerror: () => {
-                        console.error('Failed to load GAPI');
-                        reject(new Error('Failed to load GAPI'));
-                    }
-                });
-            } else {
-                setTimeout(checkGapi, 100);
+function getCycleInfoForKey(targetKey) {
+    let run = new Date(anchorDate);
+    for (let q = 0; q < 4; q++) {
+        for (let sIdx = 0; sIdx < 4; sIdx++) {
+            const span = timespans[q*4 + sIdx];
+            const start = new Date(run);
+            for (let d = 1; d <= span.len; d++) {
+                if (getKey(run) === targetKey) {
+                    return { cycleIdx: q*4+sIdx, cycleName: span.name, cycleStart: start, dayInCycle: d-1 };
+                }
+                run.setDate(run.getDate() + 1);
             }
-        };
-        checkGapi();
-    });
+        }
+    }
+    return null;
 }
 
-async function initGoogleAuth() {
-    if (!gapiReady) {
-        await loadGapi();
-    }
-    
-    // Check if API keys are configured
-    if (!import.meta.env.VITE_GOOGLE_API_KEY || !import.meta.env.VITE_GOOGLE_CLIENT_ID) {
-        alert('Google API keys not configured. Please set VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLIENT_ID in your environment variables.');
-        return null;
-    }
-    
-    try {
-        await window.gapi.client.init({
-            apiKey: import.meta.env.VITE_GOOGLE_API_KEY,
-            discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest"],
-        });
+// --- SYNC & CRUD ---
 
-        // Initialize the Google Identity Services library
-        const tokenClient = google.accounts.oauth2.initTokenClient({
-            client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-            scope: 'https://www.googleapis.com/auth/calendar.readonly',
-            callback: ''
-        });
-        
-        return tokenClient;
-    } catch (error) {
-        console.error('Error initializing Google API:', error);
-        return null;
-    }
-}
-
-async function syncWithGoogle() {
+async function syncWithGoogle(background = false) {
     if (isSyncing) return;
-    
     isSyncing = true;
-    const syncStatus = document.getElementById('syncStatus');
-    if (syncStatus) {
-        syncStatus.textContent = '☁ Syncing...';
-        syncStatus.style.color = 'orange';
-    }
+    const statusFn = (m, c) => { if(!background) updateSyncStatus(m,c); };
+    statusFn('Syncing...', 'orange');
 
     try {
-        const tokenClient = await initGoogleAuth();
-        if (!tokenClient) {
-            throw new Error('Failed to initialize Google API');
+        let token = localStorage.getItem('googleAccessToken');
+        
+        // If not running in background (user click) and no token, init flow
+        if (!token && !background) {
+            const client = await initGapiClient();
+            if (!client) throw new Error("GAPI Init Failed");
+            
+            await new Promise((res, rej) => {
+                client.callback = (resp) => {
+                    if (resp.error) rej(resp.error);
+                    token = resp.access_token;
+                    localStorage.setItem('googleAccessToken', token);
+                    res();
+                };
+                client.requestAccessToken({prompt: ''});
+            });
         }
         
-        // Request access token
-        return new Promise((resolve, reject) => {
-            tokenClient.callback = async (resp) => {
-                if (resp.error) {
-                    reject(new Error(resp.error));
-                    return;
-                }
-                
-                try {
-                    // Fetch events from Google Calendar
-                    const response = await fetch(
-                        `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent((new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)).toISOString())}&timeMax=${encodeURIComponent((new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)).toISOString())}&showDeleted=false&singleEvents=true&orderBy=startTime&access_token=${resp.access_token}`
-                    );
-                    
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    
-                    const eventData = await response.json();
-                    
-                    // Process events and save to our database
-                    const events = eventData.items || [];
-                    for (const event of events) {
-                        const startDate = event.start.date || event.start.dateTime;
-                        const dateObj = new Date(startDate);
-                        const key = `${dateObj.getFullYear()}-${dateObj.getMonth()+1}-${dateObj.getDate()}`;
-                        
-                        // Update our local db with event info
-                        if (!db[key]) {
-                            db[key] = {};
-                        }
-                        
-                        // Combine existing content with calendar event
-                        const existingContent = db[key].content || '';
-                        const eventContent = event.summary || '';
-                        const eventDescription = event.description || '';
-                        
-                        // Only add the event if it's not already in the content
-                        if (!existingContent.includes(eventContent)) {
-                            const eventText = `${eventContent}${eventDescription ? ': ' + eventDescription : ''}`;
-                            db[key].content = existingContent ? `${existingContent}\n${eventText}` : eventText;
-                            db[key].event_name = eventContent;
-                            
-                            // Save to Supabase
-                            await supabase.from('cyclic_notes').upsert({
-                                date_key: key,
-                                content: db[key].content,
-                                event_name: eventContent,
-                                tags: db[key].content.match(/#\w+/g) || []
-                            });
-                        }
-                    }
-                    
-                    // Update UI
-                    if (syncStatus) {
-                        syncStatus.textContent = '☁ Synced';
-                        syncStatus.style.color = 'green';
-                        setTimeout(() => {
-                            syncStatus.textContent = '☁';
-                            syncStatus.style.color = '';
-                        }, 2000);
-                    }
-                    
-                    // Re-render the calendar
-                    render();
-                    resolve();
-                } catch (fetchError) {
-                    console.error('Error fetching calendar events:', fetchError);
-                    reject(fetchError);
-                }
-            };
-            
-            tokenClient.requestAccessToken({prompt: ''});
-        });
-    } catch (error) {
-        console.error('Error syncing with Google Calendar:', error);
-        if (syncStatus) {
-            syncStatus.textContent = '☁ Sync Failed';
-            syncStatus.style.color = 'red';
-            setTimeout(() => {
-                syncStatus.textContent = '☁';
-                syncStatus.style.color = '';
-            }, 2000);
+        if (!token) return; 
+
+        // Profile
+        try {
+            const pRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', { 
+                headers: {Authorization: `Bearer ${token}`}
+            });
+            if (pRes.ok) {
+                const p = await pRes.json();
+                localStorage.setItem('userName', p.name);
+                localStorage.setItem('userAvatar', p.picture);
+                updateAuthUI(true, p.name, p.picture);
+            }
+        } catch(e){}
+
+        // Calendar
+        const min = new Date(Date.now() - 30*86400000).toISOString();
+        const max = new Date(Date.now() + 90*86400000).toISOString();
+        const calRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(min)}&timeMax=${encodeURIComponent(max)}&showDeleted=false&singleEvents=true&orderBy=startTime&access_token=${token}`);
+        
+        if (!calRes.ok) {
+            if (calRes.status === 401) logout(); 
+            throw new Error(calRes.statusText);
         }
-        // Still resolve to allow the isSyncing flag to reset
-        return Promise.resolve();
+
+        const events = (await calRes.json()).items || [];
+        for (const ev of events) {
+            const date = ev.start.date || ev.start.dateTime;
+            if (!date) continue;
+            const key = getKey(new Date(date));
+            const existing = db[key]?.content || '';
+            const summary = ev.summary || '';
+            
+            if (!existing.includes(summary)) {
+                const newContent = existing ? `${existing}\n${summary}` : summary;
+                await upsertNote(key, newContent, summary, db[key]?.tags||[]);
+                db[key] = { ...db[key], content: newContent, event_name: summary };
+            }
+        }
+
+        statusFn('Synced', 'green');
+        if (!background) setTimeout(() => statusFn('☁', ''), 2000);
+        render();
+        updateNoteList();
+
+    } catch (e) {
+        console.error(e);
+        statusFn('Failed', 'red');
     } finally {
         isSyncing = false;
     }
 }
 
-// --- CORE FUNCTIONALITY ---
+function updateSyncStatus(msg, color) {
+    const el = document.getElementById('syncStatus');
+    if (el) { el.textContent = msg; el.style.color = color; }
+}
+
+async function initGapiClient() {
+    // Wait for both gapi and google.accounts to be available
+    if (!gapiReady) {
+        await new Promise(r => {
+            const i = setInterval(() => { 
+                if (window.gapi && window.google && window.google.accounts) { 
+                    clearInterval(i); 
+                    gapiReady = true; 
+                    r(); 
+                }
+            }, 100);
+        });
+    }
+    
+    // Load the client module if not already loaded
+    await new Promise((resolve, reject) => {
+        window.gapi.load('client', {
+            callback: resolve,
+            onerror: reject,
+            timeout: 5000,
+            ontimeout: reject
+        });
+    });
+    
+    // Initialize the gapi client
+    await window.gapi.client.init({
+        apiKey: import.meta.env.VITE_GOOGLE_API_KEY,
+        discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest"],
+    });
+    
+    // Return the token client
+    return window.google.accounts.oauth2.initTokenClient({
+        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+        scope: GOOGLE_SCOPES,
+        callback: ''
+    });
+}
+
+// Legacy function - no longer used since we switched to individual notes
+async function upsertNote(key, content, eventName, tags) {
+    // Notes are now managed individually via cyclic_note_items
+    console.log("upsertNote deprecated - use individual note functions instead");
+}
 
 async function saveData() {
     if (!activeKey) return;
-    const content = document.getElementById('noteArea').value;
-    const event_name = document.getElementById('eventInput').value;
+    const noteArea = document.getElementById('noteArea');
+    const content = noteArea.value.trim();
+    if (!content) return;
     
     try {
-        await supabase.from('cyclic_notes').upsert({
-            date_key: activeKey, 
-            content, 
-            event_name, 
-            tags: content.match(/#\w+/g) || []
-        }, { onConflict: 'date_key' });
-        db[activeKey] = { ...db[activeKey], content, event_name };
-        render(); 
+        // Check if we're editing an existing note
+        const editingNoteId = noteArea.dataset.editingNoteId;
         
-        // Optionally sync back to Google Calendar if user has enabled it
-        // This would create/update events in Google Calendar based on notes
-        // For now, we'll just log that a save occurred
-        console.log(`Saved data for ${activeKey}`);
-    } catch (err) {
-        console.error("Save failed:", err);
+        if (editingNoteId) {
+            // Update existing note
+            await updateNoteContent(editingNoteId, content);
+            delete noteArea.dataset.editingNoteId;
+        } else {
+            // Split content by lines and create new notes
+            const lines = content.split('\n').filter(line => line.trim() !== '');
+            
+            // Get current notes count for position offset
+            const currentNotes = db[activeKey]?.notes || [];
+            const startPosition = currentNotes.length;
+            
+            // Create new notes (append, don't replace)
+            const newNotes = [];
+            for (let i = 0; i < lines.length; i++) {
+                const { data, error } = await supabase
+                    .from('cyclic_note_items')
+                    .insert({ date_key: activeKey, content: lines[i].trim(), position: startPosition + i })
+                    .select()
+                    .single();
+                
+                if (error) throw error;
+                newNotes.push({ id: data.id, content: data.content, position: data.position });
+            }
+            
+            // Update local db
+            if (!db[activeKey]) {
+                db[activeKey] = { notes: [], event_name: '', tags: [] };
+            }
+            db[activeKey].notes = [...currentNotes, ...newNotes];
+        }
+        
+        // Clear textarea after saving
+        noteArea.value = '';
+        noteArea.placeholder = 'Type here to add a new note...';
+        
+        render();
+        updateNoteList();
+        console.log("Saved", activeKey);
+    } catch(e) { 
+        console.error("Save error", e); 
     }
 }
 
 async function saveFromFocus() {
-    const text = document.getElementById('focusNoteArea').value;
+    const content = document.getElementById('focusNoteArea').value;
     if (!activeKey) return;
+    
+    db[activeKey] = { ...db[activeKey], content };
+    if (document.getElementById('noteArea')) document.getElementById('noteArea').value = content;
+    render();
+    updateNoteList();
 
-    // 1. Update local cache for instant UI feedback
-    db[activeKey] = { ...db[activeKey], content: text };
-
-    // 2. Persist to Supabase
-    const { error } = await supabase
-        .from('cyclic_notes')
-        .upsert({ date_key: activeKey, content: text }, { onConflict: 'date_key' });
-
-    if (error) {
-        console.error("Save failed:", error.message);
-        alert("Failed to save note. Check console for details.");
-    } else {
-        console.log("Saved successfully to Supabase.");
-    }
+    try {
+        await upsertNote(activeKey, content, db[activeKey]?.event_name, db[activeKey]?.tags);
+        console.log("Focused Save", activeKey);
+    } catch(e) { console.error(e); }
 }
 
-// --- RENDERING ---
-
-function render() {
-    const container = document.getElementById('calContainer');
-    if (!container) return;
-    container.innerHTML = "";
-    
-    const now = new Date();
-    const todayKey = `${now.getFullYear()}-${now.getMonth()+1}-${now.getDate()}`;
-    let run = new Date(anchorDate);
-    const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-    // Handle level 4 (day focus view) - updated to be level 4 instead of 3
-    if (viewLevel === 4) {
-        // Populate the day focus view with the selected day's content
-        const dayFocusHeader = document.getElementById('dayFocusHeader');
-        const dayFocusSubheader = document.getElementById('dayFocusSubheader');
-        const dayFocusContent = document.getElementById('dayFocusContent');
-        
-        if (dayFocusHeader && dayFocusSubheader && focusNoteArea && activeKey) {
-            // Parse activeKey to get the date
-            const [year, month, day] = activeKey.split('-').map(Number);
-            const activeDate = new Date(year, month - 1, day);
-            
-            dayFocusHeader.textContent = `${activeDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`;
-            dayFocusSubheader.textContent = getFormattedCyclicDate(activeKey);
-            
-            // Get the content for the active day
-            const dayData = db[activeKey] || {};
-            dayFocusContent.textContent = dayData.content || "No notes for this day";
+async function deleteNote(key) {
+    if (!confirm('Delete all notes for this day?')) return;
+    try {
+        // Delete all individual note items for this date
+        if (db[key] && db[key].notes) {
+            for (const note of db[key].notes) {
+                await deleteNoteItem(note.id, key);
+            }
         }
-        return; // Exit early since level 4 doesn't need calendar rendering
+    } catch(e) { console.error(e); }
+}
+
+// Sidebar
+function renderNoteList(query = "") {
+    updateNoteList(query);
+}
+
+// Expose global for inline HTML handlers
+window.calendarApp = { deleteNote };
+
+// --- DRAG AND DROP HANDLERS ---
+let draggedElement = null;
+
+function handleDragStart(e) {
+    draggedElement = e.target;
+    e.target.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/html', e.target.innerHTML);
+}
+
+function handleDragOver(e) {
+    if (e.preventDefault) {
+        e.preventDefault();
+    }
+    e.dataTransfer.dropEffect = 'move';
+    
+    const target = e.target.closest('.week-note-item');
+    if (target && target !== draggedElement) {
+        target.classList.add('drag-over');
+    }
+    return false;
+}
+
+function handleDrop(e) {
+    if (e.stopPropagation) {
+        e.stopPropagation();
+    }
+    e.preventDefault();
+
+    const target = e.target.closest('.week-note-item');
+    if (draggedElement && target && draggedElement !== target) {
+        // Check if same day
+        const draggedKey = draggedElement.dataset.dateKey;
+        const targetKey = target.dataset.dateKey;
+        
+        if (draggedKey === targetKey) {
+            // Reorder within same day
+            const notesArea = target.parentNode;
+            const allNotes = Array.from(notesArea.querySelectorAll('.week-note-item'));
+            const draggedIndex = allNotes.indexOf(draggedElement);
+            const targetIndex = allNotes.indexOf(target);
+            
+            if (draggedIndex < targetIndex) {
+                target.after(draggedElement);
+            } else {
+                target.before(draggedElement);
+            }
+            
+            // Update positions in database
+            updateNotePositions(draggedKey, notesArea);
+        }
     }
 
-    for (let q = 0; q < 4; q++) {
-        if (viewLevel >= 1 && focusRefs.q !== q) {
-            timespans.slice(q*4, q*4+4).forEach(s => run.setDate(run.getDate() + s.len));
-            continue; 
-        }
+    document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+    return false;
+}
 
-        const quarterDiv = document.createElement('div');
-        quarterDiv.className = 'quarter-group';
+function handleDragEnd(e) {
+    e.target.classList.remove('dragging');
+    document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+}
+
+// --- NOTE CRUD OPERATIONS ---
+
+async function addNewNote(dateKey) {
+    const content = "New note";
+    const position = db[dateKey]?.notes?.length || 0;
+    
+    try {
+        const { data, error } = await supabase
+            .from('cyclic_note_items')
+            .insert({ date_key: dateKey, content, position })
+            .select()
+            .single();
         
-        timespans.slice(q * 4, q * 4 + 4).forEach((s, sIdx) => {
-            const globalSIdx = q * 4 + sIdx;
-
-            if (viewLevel >= 2 && focusRefs.cycleIdx !== globalSIdx) {
-                run.setDate(run.getDate() + s.len);
-                return;
-            }
-
-            const blockWrapper = document.createElement('div');
-            blockWrapper.className = 'month-wrapper';
-            
-            let cycleClass = s.name.includes('C1') ? 'bg-c1' : s.name.includes('C2') ? 'bg-c2' : s.name.includes('C3') ? 'bg-c3' : 'bg-reset';
-            blockWrapper.innerHTML = `
-                <div class="month-header ${cycleClass}">${s.name}</div>
-                <div class="weekday-header">${weekDays.map(day => `<div>${day}</div>`).join('')}</div>
-                <div class="month-grid"></div>
-            `;
-            
-            const grid = blockWrapper.querySelector('.month-grid');
-
-            for (let i = 1; i <= s.len; i++) {
-                const key = `${run.getFullYear()}-${run.getMonth()+1}-${run.getDate()}`;
-                const weekNum = Math.ceil(i / 7);
-
-                // Calculate which week the activeKey belongs to when in week view
-                let shouldShowDay = true;
-                if (viewLevel === 3 && activeKey) {
-                    // Find which week the activeKey belongs to in this cycle
-                    const [year, month, day] = activeKey.split('-').map(Number);
-                    const activeDate = new Date(year, month - 1, day);
-                    const cycleStartDate = new Date(run); // run is the start of this cycle
-                    
-                    // Calculate the week number of the activeKey within this cycle
-                    const dayIndexInCycle = Math.floor((activeDate - cycleStartDate) / (1000 * 60 * 60 * 24));
-                    if (dayIndexInCycle >= 0 && dayIndexInCycle < s.len) {
-                        const activeWeekNum = Math.ceil((dayIndexInCycle + 1) / 7);
-                        if (weekNum !== activeWeekNum) {
-                            shouldShowDay = false;
-                        }
-                    } else {
-                        shouldShowDay = false;
-                    }
-                } else if (viewLevel >= 3 && focusRefs.weekNum !== weekNum) {
-                    run.setDate(run.getDate() + 1);
-                    continue;
-                }
-
-                if (!shouldShowDay) {
-                    run.setDate(run.getDate() + 1);
-                    continue;
-                }
-
-                const dayData = db[key] || {};
-                const d = document.createElement('div');
-                d.className = `day ${cycleClass} ${key === todayKey ? 'is-today' : ''} ${key === activeKey ? 'active' : ''}`;
-                
-                const inlineNote = (viewLevel === 3 && dayData.content) 
-                    ? `<div class="day-content-preview" style="max-height: 80px; overflow-y: auto; border: 1px solid rgba(128, 128, 128, 0.2); border-radius: 3px; padding: 4px;">${dayData.content.substring(0, 200)}...</div>` 
-                    : '';
-
-                d.innerHTML = `
-                    ${showCycleDays ? `<div class="cycle-num">${i}</div>` : ''}
-                    ${showRealDates ? `<div class="real-date">${run.getDate()} ${run.toLocaleDateString('en-US', { month: 'short' })}</div>` : ''}
-                    ${inlineNote}
-                    <div class="dot-row">
-                        ${dayData.content ? `<div class="dot dot-note"></div>` : ''}
-                        ${dayData.event_name ? `<div class="dot" style="background: var(--event);"></div>` : ''}
-                    </div>
-                `;
-
-                d.onclick = (e) => {
-                    e.stopPropagation();
-                    activeKey = key;
-                    document.getElementById('selLabel').innerText = `${key} (${getFormattedCyclicDate(key)})`;
-                    document.getElementById('noteArea').value = dayData.content || "";
-                    document.getElementById('eventInput').value = dayData.event_name || "";
-                    
-                    // If we're at level 2 (Cycle view) and click a day, go to level 3 (Week view)
-                    // If we're at level 3 (Week view) and click a day, go to level 4 (Day Focus view)
-                    if (viewLevel === 2) {
-                        viewLevel = 3;
-                        updateZoomUI();
-                    } else if (viewLevel === 3) {
-                        viewLevel = 4;
-                        updateZoomUI();
-                        
-                        // Populate the day focus view with the selected day's content
-                        const dayFocusHeader = document.getElementById('dayFocusHeader');
-                        const dayFocusSubheader = document.getElementById('dayFocusSubheader');
-                        const dayFocusContent = document.getElementById('dayFocusContent');
-                        
-                        if (dayFocusHeader && dayFocusSubheader && dayFocusContent) {
-                            dayFocusHeader.textContent = `${run.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`;
-                            dayFocusSubheader.textContent = getFormattedCyclicDate(key);
-                            dayFocusContent.textContent = dayData.content || "No notes for this day";
-                        }
-                    }
-                    
-                    render();
-                };
-                
-                grid.appendChild(d);
-                run.setDate(run.getDate() + 1); 
-            }
-            quarterDiv.appendChild(blockWrapper);
+        if (error) throw error;
+        
+        if (!db[dateKey]) {
+            db[dateKey] = { notes: [], event_name: '', tags: [] };
+        }
+        db[dateKey].notes.push({
+            id: data.id,
+            content: data.content,
+            position: data.position
         });
-        container.appendChild(quarterDiv);
+        
+        render();
+    } catch (err) {
+        console.error("Failed to add note:", err);
     }
 }
 
-// --- INITIALIZATION ---
-
-async function init() {
-    // 1. ADD WHEEL LISTENER
-    const mainElement = document.getElementById('main');
-    if (mainElement) {
-        mainElement.addEventListener('wheel', handleWheel, { passive: false });
+async function deleteNoteItem(noteId, dateKey) {
+    try {
+        const { error } = await supabase
+            .from('cyclic_note_items')
+            .delete()
+            .eq('id', noteId);
+        
+        if (error) throw error;
+        
+        if (db[dateKey]) {
+            db[dateKey].notes = db[dateKey].notes.filter(n => n.id !== noteId);
+        }
+        
+        render();
+        updateNoteList(); // Refresh sidebar
+    } catch (err) {
+        console.error("Failed to delete note:", err);
     }
+}
 
-    const zb = document.getElementById('zoomOutBtn');
-    if (zb) zb.onclick = zoomOut;
-
-    const saveBtn = document.getElementById('saveNoteBtn');
-    if (saveBtn) saveBtn.onclick = saveData;
-
-    // Add Google sync button handler
-    const loginBtn = document.getElementById('loginBtn');
-    if (loginBtn) loginBtn.onclick = syncWithGoogle;
-
-    document.getElementById('toggleRealDate').onchange = (e) => { showRealDates = e.target.checked; render(); };
-    document.getElementById('toggleCycleNum').onchange = (e) => { showCycleDays = e.target.checked; render(); };
+// Stub function for sidebar note list (can be enhanced later)
+function updateNoteList(query = "") {
+    const list = document.getElementById('noteList');
+    if (!list) return;
     
-    // Initialize anchor date input
-    const anchorDateInput = document.getElementById('anchorDateInput');
-    if (anchorDateInput) {
-        anchorDateInput.value = anchorDate.toISOString().split('T')[0];
-        anchorDateInput.onchange = (e) => {
-            const newDate = new Date(e.target.value);
-            if (!isNaN(newDate.getTime())) {
-                anchorDate = newDate;
-                localStorage.setItem('calendarAnchorDate', anchorDate.toISOString());
-                render();
+    list.innerHTML = '';
+    const lower = query.trim().toLowerCase();
+    
+    if (!activeKey || !db[activeKey]) {
+        list.innerHTML = '<div style="padding: 12px; color: var(--text-light); font-size: 12px;">Select a day to see notes</div>';
+        return;
+    }
+    
+    const dayData = db[activeKey];
+    const notes = dayData.notes || [];
+    
+    if (notes.length === 0) {
+        list.innerHTML = '<div style="padding: 12px; color: var(--text-light); font-size: 12px;">No notes for this day</div>';
+        return;
+    }
+    
+    notes.forEach((note, index) => {
+        const noteItem = document.createElement('div');
+        noteItem.className = 'note-item';
+        noteItem.dataset.noteId = note.id;
+        noteItem.dataset.dateKey = activeKey;
+        noteItem.draggable = true;
+        
+        const content = note.content || '';
+        const tags = content.match(/#[\w-]+/g) || [];
+        const textWithoutTags = content.replace(/#[\w-]+/g, '').trim();
+        const tagText = tags.join(' ').toLowerCase();
+
+        if (lower && !content.toLowerCase().includes(lower) && !tagText.includes(lower)) {
+            return;
+        }
+        
+        const tagsHtml = tags.length > 0 
+            ? `<div class="note-tags">${tags.map(tag => {
+                const color = getTagColor(tag);
+                return `<span class="tag" style="background: ${color.bg}; color: ${color.text}">${tag}</span>`;
+            }).join('')}</div>`
+            : '';
+        
+        noteItem.innerHTML = `
+            <div class="note-preview">${textWithoutTags || '(empty note)'}</div>
+            ${tagsHtml}
+            <button class="sidebar-note-delete" data-note-id="${note.id}" style="position: absolute; top: 8px; right: 8px; background: transparent; border: none; cursor: pointer; font-size: 14px; opacity: 0.5;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'" title="Delete note">🗑️</button>
+            <div class="delete-confirm" style="display: none; position: absolute; top: 30px; right: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 100;">
+                <div style="font-size: 12px; margin-bottom: 8px; color: var(--text-main);">Delete?</div>
+                <button class="confirm-yes" style="background: #dc3545; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; margin-right: 4px; font-size: 11px; font-weight: 600;">Yes</button>
+                <button class="confirm-no" style="background: var(--hover); color: var(--text-main); border: 1px solid var(--border); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">No</button>
+            </div>
+        `;
+        
+        // Click to edit note
+        noteItem.onclick = (e) => {
+            if (e.target.classList.contains('sidebar-note-delete') || e.target.classList.contains('confirm-yes') || e.target.classList.contains('confirm-no') || e.target.closest('.delete-confirm')) return;
+            const noteArea = document.getElementById('noteArea');
+            if (noteArea) {
+                noteArea.value = content;
+                noteArea.focus();
+                noteArea.dataset.editingNoteId = note.id;
             }
         };
-    }
-    
-    // Auth & Data Fetch
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-        const { data } = await supabase.from('cyclic_notes').select('*');
-        if (data) db = data.reduce((acc, row) => ({ ...acc, [row.date_key]: row }), {});
-    }
+        
+        // Delete button - show confirmation popup
+        const deleteBtn = noteItem.querySelector('.sidebar-note-delete');
+        const confirmDiv = noteItem.querySelector('.delete-confirm');
+        const yesBtn = noteItem.querySelector('.confirm-yes');
+        const noBtn = noteItem.querySelector('.confirm-no');
+        
+        deleteBtn.onclick = async (e) => {
+            e.stopPropagation();
+            confirmDiv.style.display = 'block';
+        };
+        
+        yesBtn.onclick = async (e) => {
+            e.stopPropagation();
+            await deleteNoteItem(note.id, activeKey);
+        };
+        
+        noBtn.onclick = (e) => {
+            e.stopPropagation();
+            confirmDiv.style.display = 'none';
+        };
 
-    render();
-    updateZoomUI();
+        // Drag to reorder within sidebar list
+        noteItem.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', note.id);
+            noteItem.classList.add('dragging');
+        });
+        noteItem.addEventListener('dragend', () => {
+            noteItem.classList.remove('dragging');
+            list.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+        });
+        noteItem.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            noteItem.classList.add('drag-over');
+        });
+        noteItem.addEventListener('dragleave', () => {
+            noteItem.classList.remove('drag-over');
+        });
+        noteItem.addEventListener('drop', (e) => {
+            e.preventDefault();
+            noteItem.classList.remove('drag-over');
+            const dragged = list.querySelector('.dragging');
+            if (dragged && dragged !== noteItem) {
+                const isAfter = dragged.compareDocumentPosition(noteItem) & Node.DOCUMENT_POSITION_FOLLOWING;
+                if (isAfter) {
+                    noteItem.after(dragged);
+                } else {
+                    noteItem.before(dragged);
+                }
+                updateSidebarNotePositions(activeKey, list);
+            }
+        });
+        
+        list.appendChild(noteItem);
+    });
+}
+
+async function updateNoteContent(noteId, newContent) {
+    try {
+        const { error } = await supabase
+            .from('cyclic_note_items')
+            .update({ content: newContent })
+            .eq('id', noteId);
+        
+        if (error) throw error;
+        
+        // Update local db
+        for (let key in db) {
+            const note = db[key].notes.find(n => n.id === noteId);
+            if (note) {
+                note.content = newContent;
+                break;
+            }
+        }
+    } catch (err) {
+        console.error("Failed to update note:", err);
+    }
+}
+
+async function updateNotePositions(dateKey, notesArea) {
+    const noteElements = Array.from(notesArea.querySelectorAll('.week-note-item'));
+    const updates = noteElements.map((el, index) => ({
+        id: el.dataset.noteId,
+        position: index
+    }));
+    
+    try {
+        // Update in database
+        for (const update of updates) {
+            await supabase
+                .from('cyclic_note_items')
+                .update({ position: update.position })
+                .eq('id', update.id);
+        }
+        
+        // Update local db
+        if (db[dateKey]) {
+            db[dateKey].notes.forEach(note => {
+                const update = updates.find(u => u.id === note.id);
+                if (update) {
+                    note.position = update.position;
+                }
+            });
+            db[dateKey].notes.sort((a, b) => a.position - b.position);
+        }
+    } catch (err) {
+        console.error("Failed to update positions:", err);
+    }
+}
+
+async function updateSidebarNotePositions(dateKey, listEl) {
+    const noteElements = Array.from(listEl.querySelectorAll('.note-item'));
+    const updates = noteElements.map((el, index) => ({
+        id: el.dataset.noteId,
+        position: index
+    }));
+
+    try {
+        for (const update of updates) {
+            await supabase
+                .from('cyclic_note_items')
+                .update({ position: update.position })
+                .eq('id', update.id);
+        }
+
+        if (db[dateKey]) {
+            db[dateKey].notes.forEach(note => {
+                const update = updates.find(u => u.id === note.id);
+                if (update) {
+                    note.position = update.position;
+                }
+            });
+            db[dateKey].notes.sort((a, b) => a.position - b.position);
+        }
+    } catch (err) {
+        console.error('Failed to update sidebar positions:', err);
+    }
 }
 
 init();
