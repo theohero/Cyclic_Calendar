@@ -634,7 +634,7 @@ function renderGrid(container) {
         qDiv.className = 'quarter-group';
         qDiv.dataset.qIndex = q;
         
-        timespans.slice(q*4, q*4+4).forEach((s) => {
+        timespans.slice(q*4, q*4+4).forEach((s, sIdx) => {
             const wrapper = document.createElement('div');
             wrapper.className = 'month-wrapper';
             wrapper.dataset.cycleIndex = (q * 4 + sIdx).toString();
