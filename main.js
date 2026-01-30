@@ -360,9 +360,14 @@ function smoothScrollToCenter(element) {
 
     const rect = element.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
+    const header = document.getElementById('zoomHeader');
+    const headerHeight = header ? header.getBoundingClientRect().height : 0;
+
+    const visibleTop = containerRect.top + headerHeight;
+    const visibleHeight = Math.max(0, container.clientHeight - headerHeight);
 
     const targetLeft = container.scrollLeft + (rect.left - containerRect.left) - (container.clientWidth / 2) + (rect.width / 2);
-    const targetTop = container.scrollTop + (rect.top - containerRect.top) - (container.clientHeight / 2) + (rect.height / 2);
+    const targetTop = container.scrollTop + (rect.top - visibleTop) - (visibleHeight / 2) + (rect.height / 2);
 
     const startX = container.scrollLeft;
     const startY = container.scrollTop;
@@ -637,11 +642,14 @@ function renderGrid(container) {
                 dayEl.dataset.key = key;
                 dayEl.onclick = (e) => handleDayClick(e, key, data); 
 
+                const noteCount = data.notes ? data.notes.length : 0;
+                const noteDots = noteCount > 0 ? '<div class="dot dot-note"></div>'.repeat(noteCount) : '';
+
                 dayEl.innerHTML = `
                     ${showCycleDays ? `<div class="cycle-num">${i}</div>` : ''}
                     ${showRealDates ? `<div class="real-date">${run.getDate()} ${run.toLocaleDateString('en-US',{month:'short'})}</div>` : ''}
                     <div class="dot-row">
-                        ${data.notes && data.notes.length > 0 ? '<div class="dot dot-note"></div>' : ''}
+                        ${noteDots}
                         ${data.event_name ? '<div class="dot" style="background:var(--event);"></div>' : ''}
                     </div>
                 `;
