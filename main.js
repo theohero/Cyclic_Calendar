@@ -261,7 +261,7 @@ function logout() {
 // --- ZOOM LOGIC (Refactored) ---
 // 0: Year, 1: Quarter, 2: Week, 3: Day
 
-let zoomTargetElement = null;
+let zoomTarget = null;
 
 function updateZoomUI() {
     const main = document.getElementById('main');
@@ -288,25 +288,25 @@ function handleWheel(e) {
             const hQuarter = e.target.closest('.quarter-group');
             
             let next = viewLevel;
-            zoomTargetElement = null;
+            zoomTarget = null;
 
             if (viewLevel === 0 && hQuarter) {
                 // Year -> Quarter
                 const all = [...document.querySelectorAll('.quarter-group')];
                 focusRefs.q = all.indexOf(hQuarter);
-                zoomTargetElement = hQuarter;
+                zoomTarget = { type: 'quarter', qIndex: focusRefs.q };
                 next = 1;
             } else if (viewLevel === 1 && hDay) {
                 // Quarter -> Week (Skipping Cycle)
                 savePendingNote();
                 activeKey = hDay.dataset.key;
-                zoomTargetElement = hDay;
+                zoomTarget = { type: 'week', key: activeKey };
                 next = 2; // Jump to Week
             } else if (viewLevel === 2 && hDay) {
                 // Week -> Day
                 savePendingNote();
                 activeKey = hDay.dataset.key;
-                zoomTargetElement = hDay;
+                zoomTarget = { type: 'day', key: activeKey };
                 next = 3;
             }
 
@@ -330,52 +330,72 @@ function executeZoom() {
     
     // After render completes, smooth scroll to center the zoomed element
     setTimeout(() => {
-        smoothScrollToCenter(zoomTargetElement);
-        zoomTargetElement = null;
+        scrollToZoomTarget(zoomTarget);
+        zoomTarget = null;
         setTimeout(() => { isZooming = false; }, 600); // Wait for animation
     }, 50);
 }
 
+function scrollToZoomTarget(target) {
+    if (!target) return;
+
+    let element = null;
+    if (target.type === 'quarter') {
+        const quarters = document.querySelectorAll('.quarter-group');
+        element = quarters[target.qIndex] || null;
+    } else if (target.type === 'week') {
+        element = document.querySelector(`.week-day[data-key="${target.key}"]`) || document.querySelector('.week-wrapper');
+    } else if (target.type === 'day') {
+        element = document.getElementById('dayFocusView') || document.getElementById('calContainer');
+    }
+
+    smoothScrollToCenter(element);
+}
+
 function smoothScrollToCenter(element) {
     if (!element) return;
-    
+
     const container = document.getElementById('main');
     if (!container) return;
-    
-    // Calculate element's position relative to container
+
     const rect = element.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
-    
-    // Target scroll position to center the element
-    const scrollLeft = element.offsetLeft - (container.clientWidth / 2) + (element.offsetWidth / 2);
-    const scrollTop = element.offsetTop - (container.clientHeight / 2) + (element.offsetHeight / 2);
-    
-    // Animate scroll with ease-in-out timing
+
+    const targetLeft = container.scrollLeft + (rect.left - containerRect.left) - (container.clientWidth / 2) + (rect.width / 2);
+    const targetTop = container.scrollTop + (rect.top - containerRect.top) - (container.clientHeight / 2) + (rect.height / 2);
+
     const startX = container.scrollLeft;
     const startY = container.scrollTop;
-    const deltaX = scrollLeft - startX;
-    const deltaY = scrollTop - startY;
-    const duration = 500; // 500ms animation
+    const deltaX = targetLeft - startX;
+    const deltaY = targetTop - startY;
+    const duration = 500;
     const startTime = performance.now();
-    
-    function easeInOutCubic(t) {
-        // Smooth easing with slight bounce effect
-        return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+    const maxX = Math.max(0, container.scrollWidth - container.clientWidth);
+    const maxY = Math.max(0, container.scrollHeight - container.clientHeight);
+
+    function easeOutBack(t) {
+        const c1 = 1.70158;
+        const c3 = c1 + 1;
+        return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
     }
-    
+
     function animate(currentTime) {
         const elapsed = currentTime - startTime;
         const progress = Math.min(elapsed / duration, 1);
-        const easeProgress = easeInOutCubic(progress);
-        
-        container.scrollLeft = startX + deltaX * easeProgress;
-        container.scrollTop = startY + deltaY * easeProgress;
-        
+        const easeProgress = easeOutBack(progress);
+
+        const nextX = startX + deltaX * easeProgress;
+        const nextY = startY + deltaY * easeProgress;
+
+        container.scrollLeft = Math.min(maxX, Math.max(0, nextX));
+        container.scrollTop = Math.min(maxY, Math.max(0, nextY));
+
         if (progress < 1) {
             requestAnimationFrame(animate);
         }
     }
-    
+
     requestAnimationFrame(animate);
 }
 
